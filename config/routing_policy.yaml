@@ -1,0 +1,78 @@
+# Declarative model-routing policy (ADR-0005: policy-based deterministic router, no weighted
+# score in the MVP). Loaded once at process startup by
+# policy_model_router.adapters.routing_policy_loader.load_routing_policy.
+#
+# model_groups: capabilities and authorizations per model group, independent of the concrete
+# provider/deployment that ultimately serves the call (LiteLLM's job, per ADR-0004).
+#
+# authorized_data_classifications encodes the router's half of the hard rule in
+# docs/architecture-blueprint.md section 2.3: a group is only listed for a classification once
+# every deployment in its provider pool, in this environment, is cleared for it. Groups backed
+# only by external providers (Groq for fast-small; the structured-output-specialized external
+# provider for fast-structured-output) are limited to public/internal data. Groups with a local
+# vLLM deployment in their pool (reasoning-medium, reasoning-strong) also cover
+# confidential/restricted data.
+#
+# allowed_agents empty means no per-agent restriction; requires_tool_calling on a workload is
+# false by default because agents call MCP tools through their own tool-orchestration layer, not
+# through the LLM's native function-calling API - both fields are still fully enforced and are
+# exercised by dedicated fixtures in the test suite.
+schema_version: "1.0"
+
+model_groups:
+  fast-small:
+    authorized_data_classifications: [public, internal]
+    supports_structured_output: false
+    supports_tool_calling: true
+    max_context_tokens: 16000
+    typical_latency_ms: 3000
+    estimated_cost_usd: "0.01"
+    available: true
+    allowed_agents: []
+
+  reasoning-medium:
+    authorized_data_classifications: [public, internal, confidential, restricted]
+    supports_structured_output: false
+    supports_tool_calling: true
+    max_context_tokens: 64000
+    typical_latency_ms: 15000
+    estimated_cost_usd: "0.05"
+    available: true
+    allowed_agents: []
+
+  reasoning-strong:
+    authorized_data_classifications: [public, internal, confidential, restricted]
+    supports_structured_output: false
+    supports_tool_calling: true
+    max_context_tokens: 128000
+    typical_latency_ms: 30000
+    estimated_cost_usd: "0.20"
+    available: true
+    allowed_agents: []
+
+  fast-structured-output:
+    authorized_data_classifications: [public, internal]
+    supports_structured_output: true
+    supports_tool_calling: false
+    max_context_tokens: 8000
+    typical_latency_ms: 2000
+    estimated_cost_usd: "0.01"
+    available: true
+    allowed_agents: []
+
+workloads:
+  document_extraction:
+    model_group: fast-small
+    requires_tool_calling: false
+  cashflow_analysis:
+    model_group: reasoning-medium
+    requires_tool_calling: false
+  findings_correlation:
+    model_group: reasoning-strong
+    requires_tool_calling: false
+  opinion_drafting:
+    model_group: reasoning-strong
+    requires_tool_calling: false
+  json_repair:
+    model_group: fast-structured-output
+    requires_tool_calling: false

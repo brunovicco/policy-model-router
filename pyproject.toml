@@ -5,9 +5,12 @@ description = "Python service generated from the Claude Code engineering harness
 readme = "README.md"
 requires-python = ">=3.13,<3.15"
 dependencies = [
+    "fastapi>=0.115",
     "pydantic>=2.11",
     "pydantic-settings>=2.8",
+    "pyyaml>=6.0",
     "structlog>=25.1",
+    "uvicorn>=0.34",
 ]
 
 [project.optional-dependencies]
@@ -19,11 +22,13 @@ tracing = [
 [dependency-groups]
 dev = [
     "bandit[toml]>=1.8",
+    "httpx>=0.28",
     "mypy>=1.16",
     "pip-audit>=2.9",
     "pytest>=8.4",
     "pytest-cov>=6.2",
     "ruff>=0.12",
+    "types-pyyaml>=6.0",
 ]
 
 [build-system]
