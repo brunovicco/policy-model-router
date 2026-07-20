@@ -8,6 +8,7 @@ through Agent Cards or the A2A protocol.
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated
 
@@ -29,7 +30,9 @@ from policy_model_router.entrypoints.contracts import (
     from_domain_decision,
     to_domain_request,
 )
+from policy_model_router.entrypoints.logging import configure_logging
 
+_SERVICE_NAME = "policy-model-router"
 _DEFAULT_ROUTING_POLICY_PATH = "config/routing_policy.yaml"
 
 
@@ -38,9 +41,25 @@ def _routing_policy_path() -> Path:
     return Path(os.environ.get("ROUTING_POLICY_PATH", _DEFAULT_ROUTING_POLICY_PATH))
 
 
+def _service_version() -> str:
+    """Return the installed package version, or a placeholder outside a packaged install."""
+    try:
+        return version(_SERVICE_NAME)
+    except PackageNotFoundError:
+        return "0.0.0-dev"
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the routing policy once at startup; fail fast if it is missing or invalid."""
+    """Configure structured logging and load the routing policy once at startup.
+
+    Fails fast if the routing policy is missing or invalid.
+    """
+    configure_logging(
+        service=_SERVICE_NAME,
+        environment=os.environ.get("APP_ENV", "development"),
+        version=_service_version(),
+    )
     policy = load_routing_policy(_routing_policy_path())
     app.state.route_model_use_case = RouteModelUseCase(
         policy, clock=SystemClock(), id_generator=Uuid4IdGenerator()
