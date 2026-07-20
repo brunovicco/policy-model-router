@@ -37,7 +37,4 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 USER app
 
-# Replace this framework-neutral placeholder with the project's entrypoint, for example:
-#   CMD ["uvicorn", "policy_model_router.entrypoints.http:app", "--host", "0.0.0.0", "--port", "8000"]
-#   CMD ["python", "-m", "policy_model_router"]
-CMD ["python", "-c", "import policy_model_router; print(policy_model_router.__doc__)"]
+CMD ["uvicorn", "policy_model_router.entrypoints.http:app", "--host", "0.0.0.0", "--port", "8000"]
