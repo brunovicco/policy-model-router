@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from policy_model_router.entrypoints import http as http_module
 from policy_model_router.entrypoints.http import app
 
 _SHIPPED_POLICY_PATH = Path(__file__).resolve().parents[2] / "config" / "routing_policy.yaml"
@@ -37,6 +38,20 @@ def _valid_payload(**overrides: Any) -> dict[str, Any]:
     }
     payload.update(overrides)
     return payload
+
+
+def test_startup_configures_structured_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, str]] = []
+    monkeypatch.setattr(http_module, "configure_logging", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+
+    with TestClient(app):
+        pass
+
+    assert len(calls) == 1
+    assert calls[0]["service"] == "policy-model-router"
+    assert calls[0]["environment"]
+    assert calls[0]["version"]
 
 
 def test_route_returns_the_decision_for_a_valid_request(client: TestClient) -> None:
