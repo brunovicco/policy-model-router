@@ -255,6 +255,7 @@ Outras configurações de runtime:
 | `API_KEYS` | *(obrigatória)* | Objeto JSON mapeando cada `agent_name` à sua própria chave, comparada ao header `X-API-Key` em `POST /route`; o serviço recusa iniciar se estiver ausente, vazia ou malformada |
 | `RATE_LIMIT_MAX_REQUESTS` | `60` | Requisições permitidas por par `(IP do cliente, agent_name)` por janela |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Duração da janela de rate limit, em segundos |
+| `REDIS_URL` | *(ausente)* | Opcional. Compartilha o rate limit entre réplicas via Redis (ADR-0008); requer `uv sync --extra rate-limit`. Se ausente, mantém o limitador padrão em memória, por processo |
 
 ## Autenticação e rate limiting
 
@@ -267,12 +268,15 @@ demais. Isso ainda não é um IAM completo: não há expiração de chave, escop
 [emenda da ADR-0007](docs/adr/0007-http-boundary-hardening.md) para o que um mecanismo mais forte
 (mTLS, OAuth2 client credentials) acrescentaria.
 
-Também há rate limiting por par `(IP do cliente, agent_name)`, usando um contador em memória de
-janela fixa (`RATE_LIMIT_MAX_REQUESTS` por `RATE_LIMIT_WINDOW_SECONDS`); ultrapassar o limite
-retorna `429 rate_limit_exceeded`. Esse estado é **por processo**, não compartilhado entre réplicas
-— um deployment com múltiplas instâncias aplica o limite por instância, não de forma global no
-cluster. Veja a [ADR-0007](docs/adr/0007-http-boundary-hardening.md) para o racional completo e os
-débitos residuais.
+Também há rate limiting por par `(IP do cliente, agent_name)` (`RATE_LIMIT_MAX_REQUESTS` por
+`RATE_LIMIT_WINDOW_SECONDS`); ultrapassar o limite retorna `429 rate_limit_exceeded`. Por padrão é
+um contador em memória, de janela fixa, **por processo** — um deployment com múltiplas instâncias
+aplica o limite por instância, não de forma global no cluster (ADR-0007). Defina `REDIS_URL` (e
+instale `uv sync --extra rate-limit`) para compartilhar o limite entre réplicas; use
+`docker compose up -d redis` para uma instância local. O limitador com Redis falha aberto em caso
+de erro no backend (permite a requisição em vez de bloquear o tráfego de roteamento por uma
+indisponibilidade não relacionada), mas falha fechado na inicialização se o Redis configurado
+estiver inacessível (ADR-0008).
 
 ## Disponibilidade
 
@@ -283,13 +287,18 @@ camada de aplicação resolve esse valor através de um port `AvailabilityProvid
 saúde em tempo real de provedor/gateway — o port existe para que um adapter real possa ser
 adicionado depois, sem alterar o caso de uso de roteamento nem as restrições de domínio.
 
-## Saúde e prontidão
+## Saúde, prontidão e métricas
 
 `GET /health` sempre retorna `200 {"status": "ok"}` assim que o processo está servindo requisições.
 `GET /readyz` retorna `200 {"status": "ready"}` assim que a política de roteamento é carregada com
-sucesso na inicialização. Nenhum dos dois endpoints exige `X-API-Key` nem conta para o rate limit,
-então orquestradores e balanceadores de carga podem monitorá-los sem custo. `/readyz` é uma
-checagem rasa: este serviço não tem dependência externa para verificar, então "pronto" significa
+sucesso na inicialização. `GET /metrics` retorna saída em formato Prometheus, hoje limitada a
+`policy_model_router_rate_limiter_backend_unavailable_total` — um contador incrementado toda vez
+que o rate limiter com Redis falha aberto porque o Redis estava inacessível; monitore
+`increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (somado entre
+réplicas) para detectar uma indisponibilidade prolongada em vez de depender só da linha de log
+`rate_limiter_backend_unavailable`. Nenhum dos três endpoints exige `X-API-Key` nem conta para o
+rate limit, então orquestradores e scrapers podem monitorá-los sem custo. `/readyz` é uma checagem
+rasa: este serviço não tem dependência externa para verificar, então "pronto" significa
 "inicialização concluída", não "um sistema posterior está saudável".
 
 ## Container
@@ -318,7 +327,8 @@ domain      -> no outer layer
   roteamento, e predicados de restrição puros;
 - `application`: caso de uso de roteamento determinístico e ports de clock/ID/disponibilidade;
 - `adapters`: carregador de política YAML, clock do sistema, gerador de UUID, provedor estático de
-  disponibilidade, rate limiter em memória e suporte a tracing opcional;
+  disponibilidade, rate limiter em memória (padrão) e rate limiter opcional com Redis, e suporte a
+  tracing opcional;
 - `entrypoints`: contratos Pydantic de wire, endpoints FastAPI (`/route`, `/health`, `/readyz`),
   mapeamento de erros e logging estruturado.
 
@@ -327,8 +337,9 @@ Veja [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) para as regras de dependênc
 [índice de ADRs](docs/ARCHITECTURE.md#related-decisions) para entender por que a fronteira de
 provedor ([ADR-0004](docs/adr/0004-litellm-provider-boundary.md)), o algoritmo de roteamento
 ([ADR-0005](docs/adr/0005-deterministic-policy-routing.md)), o seam de disponibilidade
-([ADR-0006](docs/adr/0006-availability-provider-port.md)) e o endurecimento da fronteira HTTP
-([ADR-0007](docs/adr/0007-http-boundary-hardening.md)) são como são.
+([ADR-0006](docs/adr/0006-availability-provider-port.md)), o endurecimento da fronteira HTTP
+([ADR-0007](docs/adr/0007-http-boundary-hardening.md)) e o rate limiter compartilhado opcional
+([ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md)) são como são.
 
 ## Escopo atual
 
@@ -343,13 +354,15 @@ O MVP intencionalmente não:
 - fornece um IAM completo: `API_KEYS` por agente autentica um `agent_name` reivindicado, mas sem
   expiração, escopo ou garantia de identidade além de "sabia a chave certa" (veja
   [Autenticação e rate limiting](#autenticação-e-rate-limiting));
-- compartilha o estado de rate limit entre réplicas; cada instância aplica seu próprio limite.
+- compartilha o estado de rate limit entre réplicas *por padrão*; isso exige habilitar `REDIS_URL`,
+  o que por sua vez adiciona o Redis como uma dependência de infraestrutura real, com sua própria
+  disponibilidade a gerenciar.
 
 Essas fronteiras mantêm as decisões de política explícitas. Adicione fallback, pontuação,
-verificação de saúde em tempo real ou autenticação/rate-limit por agente ou com estado
-compartilhado somente quando houver dados de avaliação ou um requisito concreto de deployment que
-justifique o comportamento. Veja [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#known-gaps) para a
-lista completa de débitos rastreados.
+verificação de saúde em tempo real ou garantias mais fortes de identidade/alta disponibilidade
+somente quando houver dados de avaliação ou um requisito concreto de deployment que justifique o
+comportamento. Veja [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#known-gaps) para a lista completa
+de débitos rastreados.
 
 ## Desenvolvimento
 

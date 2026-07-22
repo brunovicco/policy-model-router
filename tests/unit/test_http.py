@@ -1,6 +1,8 @@
 """Behavior tests for the ``POST /route`` HTTP entrypoint, using the shipped routing policy."""
 
 import json
+import sys
+import types
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient]:
     """A TestClient wired to the real shipped routing policy, triggering FastAPI's lifespan."""
     monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
     monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
     with TestClient(app) as test_client:
         yield test_client
 
@@ -53,6 +56,7 @@ def test_startup_configures_structured_logging(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(http_module, "configure_logging", lambda **kwargs: calls.append(kwargs))
     monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
     monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
 
     with TestClient(app):
         pass
@@ -68,6 +72,7 @@ def test_startup_fails_closed_when_api_keys_is_not_configured(
 ) -> None:
     monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
     monkeypatch.delenv("API_KEYS", raising=False)
+    monkeypatch.delenv("REDIS_URL", raising=False)
 
     with pytest.raises(RuntimeError, match="API_KEYS"), TestClient(app):
         pass
@@ -78,6 +83,7 @@ def test_startup_fails_closed_when_api_keys_is_malformed_json(
 ) -> None:
     monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
     monkeypatch.setenv("API_KEYS", "not valid json")
+    monkeypatch.delenv("REDIS_URL", raising=False)
 
     with pytest.raises(RuntimeError, match="API_KEYS"), TestClient(app):
         pass
@@ -88,8 +94,39 @@ def test_startup_fails_closed_when_api_keys_is_not_an_object_of_strings(
 ) -> None:
     monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
     monkeypatch.setenv("API_KEYS", json.dumps(["not", "an", "object"]))
+    monkeypatch.delenv("REDIS_URL", raising=False)
 
     with pytest.raises(RuntimeError, match="API_KEYS"), TestClient(app):
+        pass
+
+
+def test_startup_fails_closed_when_rate_limiter_backend_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured but unreachable REDIS_URL must stop startup, not degrade silently."""
+    fake_redis_module = types.ModuleType("redis")
+    fake_asyncio_module = types.ModuleType("redis.asyncio")
+
+    class _UnreachableClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        @classmethod
+        def from_url(cls, *_args: object, **_kwargs: object) -> "_UnreachableClient":
+            return cls()
+
+        async def ping(self) -> None:
+            raise ConnectionError("redis unreachable")
+
+    fake_asyncio_module.Redis = _UnreachableClient  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "redis", fake_redis_module)
+    monkeypatch.setitem(sys.modules, "redis.asyncio", fake_asyncio_module)
+
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+
+    with pytest.raises(RuntimeError, match="rate limiter backend"), TestClient(app):
         pass
 
 
@@ -170,6 +207,7 @@ def test_route_rejects_a_request_from_an_unconfigured_agent(client: TestClient) 
 def test_route_is_rate_limited_per_client_and_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
     monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.setenv("RATE_LIMIT_MAX_REQUESTS", "1")
 
     with TestClient(app) as rate_limited_client:
@@ -198,3 +236,11 @@ def test_readyz_endpoint_requires_no_api_key(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
+
+
+def test_metrics_endpoint_requires_no_api_key(client: TestClient) -> None:
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "text/plain" in response.headers["content-type"]
+    assert "policy_model_router_rate_limiter_backend_unavailable_total" in response.text

@@ -1,8 +1,10 @@
 """In-memory, fixed-window rate limiter for the HTTP entrypoint.
 
 Per ADR-0007, this is a single-process limiter: it has no shared state across replicas or worker
-processes. It bounds abuse from a single instance but does not enforce a cluster-wide limit; a
-multi-replica deployment needs a shared store (e.g. Redis) for that.
+processes. It bounds abuse from a single instance but does not enforce a cluster-wide limit. This
+is the default when ``REDIS_URL`` is not configured; see
+:class:`~policy_model_router.adapters.redis_rate_limiter.RedisRateLimiter` and ADR-0008 for the
+shared alternative.
 """
 
 import time
@@ -35,11 +37,13 @@ class InMemoryRateLimiter:
         self._time_source = time_source
         self._windows: dict[str, tuple[float, int]] = {}
 
-    def allow(self, key: str) -> bool:
+    async def allow(self, key: str) -> bool:
         """Return whether one more request for ``key`` is within its current window.
 
         Starts a new window for ``key`` if none exists or the previous one has elapsed; otherwise
-        increments the count and compares it against the configured limit.
+        increments the count and compares it against the configured limit. Async only to satisfy
+        the shared :class:`~policy_model_router.application.ports.RateLimiter` protocol; this
+        implementation performs no I/O and never awaits anything.
         """
         now = self._time_source()
         window_start, count = self._windows.get(key, (now, 0))
@@ -48,3 +52,7 @@ class InMemoryRateLimiter:
         count += 1
         self._windows[key] = (window_start, count)
         return count <= self._max_requests
+
+    async def ping(self) -> None:
+        """No-op: an in-process limiter has no backend to verify connectivity to."""
+        return

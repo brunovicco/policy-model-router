@@ -17,6 +17,14 @@ from policy_model_router.domain.routing import RouteRequest
 
 
 @pytest.fixture
+def anyio_backend() -> str:
+    """Run ``@pytest.mark.anyio`` async tests on asyncio only (anyio is already a dependency of
+    fastapi/httpx; this avoids adding pytest-asyncio just to run a handful of async tests).
+    """
+    return "asyncio"
+
+
+@pytest.fixture
 def make_request() -> Callable[..., RouteRequest]:
     """Return a factory building a permissive ``RouteRequest``, field overrides accepted."""
 

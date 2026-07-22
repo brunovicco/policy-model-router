@@ -13,6 +13,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    services:
+      # Backs tests/integration/test_redis_rate_limiter_integration.py (ADR-0008). Those tests
+      # skip themselves if unreachable, so this service only makes them run instead of skip.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      REDIS_URL: redis://localhost:6379/0
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -27,7 +43,7 @@ jobs:
         run: uv python install
 
       - name: Install dependencies
-        run: uv sync --frozen --all-groups
+        run: uv sync --frozen --all-groups --extra rate-limit
 
       - name: Project quality gate
         run: uv run python scripts/quality_gate.py

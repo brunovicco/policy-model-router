@@ -29,6 +29,23 @@ build context.
 
 Copy `.env.example` only when the application supports local dotenv loading. Never commit `.env` or real credentials.
 
+## Optional local Redis (shared rate limiting)
+
+Only needed to exercise `REDIS_URL`/`RedisRateLimiter` (ADR-0008); the default in-memory rate
+limiter needs none of this.
+
+```bash
+docker compose up -d redis
+uv sync --extra rate-limit
+REDIS_URL=redis://localhost:6379/0 uv run uvicorn policy_model_router.entrypoints.http:app --reload
+```
+
+`docker compose down` stops it. Unit tests never talk to a real Redis (they fake the client), but
+`tests/integration/test_redis_rate_limiter_integration.py` does - with the container above running
+and `REDIS_URL` set, `uv run pytest` picks it up automatically; without either, that module skips
+itself instead of failing. `.github/workflows/quality.yml` runs a `redis:7-alpine` service and
+installs the `rate-limit` extra, so it always runs (not skips) in CI.
+
 ## Claude Code
 
 - Run `/memory` to confirm loaded instructions.
