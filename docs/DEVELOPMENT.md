@@ -16,15 +16,14 @@ uv run python scripts/quality_gate.py
 
 ```bash
 docker build -t policy-model-router .
-docker run --rm policy-model-router
+docker run --rm -p 8000:8000 policy-model-router
 ```
 
 `Dockerfile` is a multi-stage, uv-based build: a `builder` stage installs the locked
-dependencies and builds the package, then only the resulting virtualenv and source are copied
-into a slim, non-root runtime image. The shipped `CMD` is a placeholder - this harness is
-framework-agnostic and does not assume an ASGI app, CLI, or worker loop. Replace it with the
-project's real entrypoint. Adjust `.dockerignore` if new top-level files or directories need to
-be excluded from the build context.
+dependencies and builds the package, then the resulting virtualenv and source are copied into a
+slim, non-root runtime image. The container starts the FastAPI application with Uvicorn on port
+8000. Adjust `.dockerignore` if new top-level files or directories need to be excluded from the
+build context.
 
 ## Local configuration
 

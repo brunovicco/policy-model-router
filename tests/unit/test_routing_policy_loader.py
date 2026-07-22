@@ -22,6 +22,7 @@ schema_version: "1.0"
 model_groups:
   fast-small:
     authorized_data_classifications: [public]
+    authorized_risk_levels: [low, medium, high, critical]
     supports_structured_output: false
     supports_tool_calling: true
     max_context_tokens: 1000
@@ -31,6 +32,7 @@ model_groups:
     allowed_agents: []
   reasoning-medium:
     authorized_data_classifications: [public]
+    authorized_risk_levels: [low, medium, high, critical]
     supports_structured_output: false
     supports_tool_calling: true
     max_context_tokens: 1000
@@ -40,6 +42,7 @@ model_groups:
     allowed_agents: []
   reasoning-strong:
     authorized_data_classifications: [public]
+    authorized_risk_levels: [low, medium, high, critical]
     supports_structured_output: false
     supports_tool_calling: true
     max_context_tokens: 1000
@@ -49,6 +52,7 @@ model_groups:
     allowed_agents: []
   fast-structured-output:
     authorized_data_classifications: [public]
+    authorized_risk_levels: [low, medium, high, critical]
     supports_structured_output: true
     supports_tool_calling: false
     max_context_tokens: 1000
@@ -111,6 +115,7 @@ def test_load_routing_policy_fails_closed_when_a_model_group_is_missing(tmp_path
     incomplete = _VALID_YAML.replace(
         """  fast-structured-output:
     authorized_data_classifications: [public]
+    authorized_risk_levels: [low, medium, high, critical]
     supports_structured_output: true
     supports_tool_calling: false
     max_context_tokens: 1000

@@ -12,10 +12,11 @@ from policy_model_router.domain.constraints import (
     check_data_classification,
     check_max_cost,
     check_max_latency,
+    check_risk_level,
     check_structured_output,
     check_tool_calling,
 )
-from policy_model_router.domain.enums import DataClassification
+from policy_model_router.domain.enums import DataClassification, RiskLevel
 from policy_model_router.domain.routing import RouteRequest
 
 MakeRequest = Callable[..., RouteRequest]
@@ -27,6 +28,7 @@ def test_constraints_run_in_the_adr_0005_order() -> None:
     """The fixed evaluation order matches ADR-0005's list, exactly and completely."""
     expected = (
         check_data_classification,
+        check_risk_level,
         check_structured_output,
         check_tool_calling,
         check_context_window,
@@ -36,6 +38,27 @@ def test_constraints_run_in_the_adr_0005_order() -> None:
         check_agent_allowlist,
     )
     assert expected == CONSTRAINTS
+
+
+def test_risk_level_passes_when_group_is_authorized(
+    make_request: MakeRequest, make_profile: MakeProfile, make_rule: MakeRule
+) -> None:
+    request = make_request(risk_level=RiskLevel.CRITICAL)
+    profile = make_profile(authorized_risk_levels=frozenset({RiskLevel.CRITICAL}))
+
+    assert check_risk_level(request, profile, make_rule()) is None
+
+
+def test_risk_level_rejects_when_group_is_not_authorized(
+    make_request: MakeRequest, make_profile: MakeProfile, make_rule: MakeRule
+) -> None:
+    request = make_request(risk_level=RiskLevel.CRITICAL)
+    profile = make_profile(authorized_risk_levels=frozenset({RiskLevel.LOW}))
+
+    reason = check_risk_level(request, profile, make_rule())
+
+    assert reason is not None
+    assert "critical" in reason
 
 
 def test_data_classification_passes_when_group_is_authorized(

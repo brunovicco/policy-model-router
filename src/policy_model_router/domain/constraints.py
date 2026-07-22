@@ -28,6 +28,19 @@ def check_data_classification(
     return f"not authorized for data classification {request.data_classification.value!r}"
 
 
+def check_risk_level(
+    request: RouteRequest, profile: ModelGroupProfile, _rule: WorkloadRule
+) -> str | None:
+    """Reject a group not authorized for the request's workflow risk tier.
+
+    Independent of data classification: a group can be fully cleared for the data involved and
+    still be unauthorized for a high-stakes decision, per ADR-0005's amendment.
+    """
+    if request.risk_level in profile.authorized_risk_levels:
+        return None
+    return f"not authorized for risk level {request.risk_level.value!r}"
+
+
 def check_structured_output(
     request: RouteRequest, profile: ModelGroupProfile, _rule: WorkloadRule
 ) -> str | None:
@@ -105,6 +118,7 @@ def check_agent_allowlist(
 
 CONSTRAINTS: tuple[Constraint, ...] = (
     check_data_classification,
+    check_risk_level,
     check_structured_output,
     check_tool_calling,
     check_context_window,

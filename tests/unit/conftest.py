@@ -48,6 +48,7 @@ def make_profile() -> Callable[..., ModelGroupProfile]:
     def _make(**overrides: Any) -> ModelGroupProfile:
         fields: dict[str, Any] = {
             "authorized_data_classifications": frozenset(DataClassification),
+            "authorized_risk_levels": frozenset(RiskLevel),
             "supports_structured_output": True,
             "supports_tool_calling": True,
             "max_context_tokens": 100_000,

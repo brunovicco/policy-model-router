@@ -10,7 +10,9 @@
    MVP has no weighted-score fallback (that is Phase 3).
 """
 
-from policy_model_router.application.ports import Clock, IdGenerator
+from dataclasses import replace
+
+from policy_model_router.application.ports import AvailabilityProvider, Clock, IdGenerator
 from policy_model_router.domain.catalog import RoutingPolicy
 from policy_model_router.domain.constraints import CONSTRAINTS
 from policy_model_router.domain.enums import ModelGroup
@@ -29,11 +31,27 @@ class IncompleteRoutingPolicyError(Exception):
 class RouteModelUseCase:
     """Evaluate one model-routing request against a declarative routing policy."""
 
-    def __init__(self, policy: RoutingPolicy, *, clock: Clock, id_generator: IdGenerator) -> None:
-        """Bind the routing policy and the clock/id-generator ports used to build decisions."""
+    def __init__(
+        self,
+        policy: RoutingPolicy,
+        *,
+        clock: Clock,
+        id_generator: IdGenerator,
+        availability: AvailabilityProvider,
+    ) -> None:
+        """Bind the routing policy and the clock/id-generator/availability ports.
+
+        Args:
+            policy: The declarative routing policy loaded for this environment.
+            clock: Source of the timestamp attached to each decision.
+            id_generator: Source of each decision's unique identifier.
+            availability: Resolves each model group's effective availability at decision time; see
+                ADR-0006.
+        """
         self._policy = policy
         self._clock = clock
         self._id_generator = id_generator
+        self._availability = availability
 
     def route(self, request: RouteRequest) -> RouteDecision:
         """Return the routing decision for one request, or raise if none can be reached."""
@@ -46,8 +64,12 @@ class RouteModelUseCase:
 
         rejection_reasons: dict[ModelGroup, str] = {}
         for model_group, profile in self._policy.model_groups.items():
+            effective_profile = replace(
+                profile,
+                available=self._availability.is_available(model_group, profile.available),
+            )
             for constraint in CONSTRAINTS:
-                reason = constraint(request, profile, workload_rule)
+                reason = constraint(request, effective_profile, workload_rule)
                 if reason is not None:
                     rejection_reasons[model_group] = reason
                     break

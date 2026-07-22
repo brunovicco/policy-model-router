@@ -12,6 +12,7 @@ from decimal import Decimal
 
 import pytest
 
+from policy_model_router.adapters.availability import StaticAvailabilityProvider
 from policy_model_router.application.route_model import (
     IncompleteRoutingPolicyError,
     RouteModelUseCase,
@@ -47,10 +48,14 @@ def reference_policy(make_profile: MakeProfile, make_rule: MakeRule) -> RoutingP
     """Build an in-memory policy shaped like the shipped ``config/routing_policy.yaml``."""
     external_only = frozenset({DataClassification.PUBLIC, DataClassification.INTERNAL})
     local_backed = frozenset(DataClassification)
+    up_to_medium_risk = frozenset({RiskLevel.LOW, RiskLevel.MEDIUM})
+    up_to_high_risk = frozenset({RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH})
+    every_risk_level = frozenset(RiskLevel)
     model_groups = types.MappingProxyType(
         {
             ModelGroup.FAST_SMALL: make_profile(
                 authorized_data_classifications=external_only,
+                authorized_risk_levels=up_to_medium_risk,
                 supports_structured_output=False,
                 max_context_tokens=16_000,
                 typical_latency_ms=3_000,
@@ -58,6 +63,7 @@ def reference_policy(make_profile: MakeProfile, make_rule: MakeRule) -> RoutingP
             ),
             ModelGroup.REASONING_MEDIUM: make_profile(
                 authorized_data_classifications=local_backed,
+                authorized_risk_levels=up_to_high_risk,
                 supports_structured_output=False,
                 max_context_tokens=64_000,
                 typical_latency_ms=15_000,
@@ -65,6 +71,7 @@ def reference_policy(make_profile: MakeProfile, make_rule: MakeRule) -> RoutingP
             ),
             ModelGroup.REASONING_STRONG: make_profile(
                 authorized_data_classifications=local_backed,
+                authorized_risk_levels=every_risk_level,
                 supports_structured_output=False,
                 max_context_tokens=128_000,
                 typical_latency_ms=30_000,
@@ -72,6 +79,7 @@ def reference_policy(make_profile: MakeProfile, make_rule: MakeRule) -> RoutingP
             ),
             ModelGroup.FAST_STRUCTURED_OUTPUT: make_profile(
                 authorized_data_classifications=external_only,
+                authorized_risk_levels=up_to_medium_risk,
                 supports_structured_output=True,
                 supports_tool_calling=False,
                 max_context_tokens=8_000,
@@ -96,7 +104,10 @@ def reference_policy(make_profile: MakeProfile, make_rule: MakeRule) -> RoutingP
 def use_case(reference_policy: RoutingPolicy) -> RouteModelUseCase:
     """Build the use case under test, wired to deterministic clock/id-generator stubs."""
     return RouteModelUseCase(
-        reference_policy, clock=_FixedClock(), id_generator=_FixedIdGenerator()
+        reference_policy,
+        clock=_FixedClock(),
+        id_generator=_FixedIdGenerator(),
+        availability=StaticAvailabilityProvider(),
     )
 
 
@@ -191,7 +202,10 @@ def test_route_raises_incomplete_policy_error_when_workload_has_no_mapping(
         workloads=types.MappingProxyType({}),
     )
     empty_use_case = RouteModelUseCase(
-        empty_policy, clock=_FixedClock(), id_generator=_FixedIdGenerator()
+        empty_policy,
+        clock=_FixedClock(),
+        id_generator=_FixedIdGenerator(),
+        availability=StaticAvailabilityProvider(),
     )
 
     with pytest.raises(IncompleteRoutingPolicyError):
@@ -209,3 +223,45 @@ def test_route_is_deterministic_for_the_same_request(
     second = use_case.route(request)
 
     assert first == second
+
+
+def test_route_rejects_the_mapped_group_when_risk_level_is_not_authorized(
+    use_case: RouteModelUseCase, make_request: MakeRequest
+) -> None:
+    request = make_request(
+        workload=Workload.CASHFLOW_ANALYSIS,
+        risk_level=RiskLevel.CRITICAL,
+        max_latency_ms=60_000,
+    )
+
+    with pytest.raises(NoViableModelGroupError) as excinfo:
+        use_case.route(request)
+
+    assert excinfo.value.model_group == ModelGroup.REASONING_MEDIUM
+    assert "critical" in excinfo.value.reason
+
+
+class _AlwaysUnavailable:
+    """Availability provider stub that overrides every group to unavailable."""
+
+    def is_available(self, _model_group: ModelGroup, _declared_available: bool) -> bool:
+        """Always report unavailable, regardless of the policy's declared flag."""
+        return False
+
+
+def test_route_rejects_a_group_the_availability_provider_marks_unavailable(
+    reference_policy: RoutingPolicy, make_request: MakeRequest
+) -> None:
+    use_case = RouteModelUseCase(
+        reference_policy,
+        clock=_FixedClock(),
+        id_generator=_FixedIdGenerator(),
+        availability=_AlwaysUnavailable(),
+    )
+    request = make_request(workload=Workload.CASHFLOW_ANALYSIS, max_latency_ms=60_000)
+
+    with pytest.raises(NoViableModelGroupError) as excinfo:
+        use_case.route(request)
+
+    assert excinfo.value.model_group == ModelGroup.REASONING_MEDIUM
+    assert "unavailable" in excinfo.value.reason

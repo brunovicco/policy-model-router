@@ -13,6 +13,15 @@
 # vLLM deployment in their pool (reasoning-medium, reasoning-strong) also cover
 # confidential/restricted data.
 #
+# authorized_risk_levels (ADR-0005 amendment) is independent of data classification: it is the
+# highest workflow risk tier this group may serve, regardless of the data involved. Weaker/cheaper
+# groups (fast-small, fast-structured-output) are not authorized above medium risk; only
+# reasoning-strong is authorized for critical-risk workflows.
+#
+# available is a static, hand-edited flag (see ADR-0006): it is not a live provider/gateway health
+# signal. The application layer resolves it through the AvailabilityProvider port, which today
+# passes this value through unchanged.
+#
 # allowed_agents empty means no per-agent restriction; requires_tool_calling on a workload is
 # false by default because agents call MCP tools through their own tool-orchestration layer, not
 # through the LLM's native function-calling API - both fields are still fully enforced and are
@@ -22,6 +31,7 @@ schema_version: "1.0"
 model_groups:
   fast-small:
     authorized_data_classifications: [public, internal]
+    authorized_risk_levels: [low, medium]
     supports_structured_output: false
     supports_tool_calling: true
     max_context_tokens: 16000
@@ -32,6 +42,7 @@ model_groups:
 
   reasoning-medium:
     authorized_data_classifications: [public, internal, confidential, restricted]
+    authorized_risk_levels: [low, medium, high]
     supports_structured_output: false
     supports_tool_calling: true
     max_context_tokens: 64000
@@ -42,6 +53,7 @@ model_groups:
 
   reasoning-strong:
     authorized_data_classifications: [public, internal, confidential, restricted]
+    authorized_risk_levels: [low, medium, high, critical]
     supports_structured_output: false
     supports_tool_calling: true
     max_context_tokens: 128000
@@ -52,6 +64,7 @@ model_groups:
 
   fast-structured-output:
     authorized_data_classifications: [public, internal]
+    authorized_risk_levels: [low, medium]
     supports_structured_output: true
     supports_tool_calling: false
     max_context_tokens: 8000

@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
-from policy_model_router.domain.enums import DataClassification, ModelGroup, Workload
+from policy_model_router.domain.enums import DataClassification, ModelGroup, RiskLevel, Workload
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,11 +23,17 @@ class ModelGroupProfile:
     is cleared for that classification. Provider/deployment selection itself is LiteLLM's job
     (ADR-0004), not this router's.
 
+    ``authorized_risk_levels`` is a separate, policy-level authorization: the highest-stakes
+    workflow risk tier this group may serve, independent of data classification. See ADR-0005's
+    amendment for the rationale (weaker/cheaper groups are not authorized for high-stakes
+    decisions, regardless of the data classification involved).
+
     Attributes:
         allowed_agents: Agent names allowed to use this group; empty means no restriction.
     """
 
     authorized_data_classifications: frozenset[DataClassification]
+    authorized_risk_levels: frozenset[RiskLevel]
     supports_structured_output: bool
     supports_tool_calling: bool
     max_context_tokens: int

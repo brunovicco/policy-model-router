@@ -1,7 +1,7 @@
 [project]
 name = "policy-model-router"
 version = "0.1.0"
-description = "Python service generated from the Claude Code engineering harness"
+description = "Deterministic, policy-based model-group router for governed LLM workloads"
 readme = "README.md"
 requires-python = ">=3.13,<3.15"
 dependencies = [

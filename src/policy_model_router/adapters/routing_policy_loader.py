@@ -16,7 +16,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from policy_model_router.domain.catalog import ModelGroupProfile, RoutingPolicy, WorkloadRule
-from policy_model_router.domain.enums import DataClassification, ModelGroup, Workload
+from policy_model_router.domain.enums import DataClassification, ModelGroup, RiskLevel, Workload
 
 
 class RoutingPolicyLoadError(RuntimeError):
@@ -29,6 +29,7 @@ class _ModelGroupProfileConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     authorized_data_classifications: Annotated[list[DataClassification], Field(min_length=1)]
+    authorized_risk_levels: Annotated[list[RiskLevel], Field(min_length=1)]
     supports_structured_output: bool
     supports_tool_calling: bool
     max_context_tokens: Annotated[int, Field(gt=0)]
@@ -75,6 +76,7 @@ def _to_domain(config: _RoutingPolicyConfig) -> RoutingPolicy:
         {
             group: ModelGroupProfile(
                 authorized_data_classifications=frozenset(profile.authorized_data_classifications),
+                authorized_risk_levels=frozenset(profile.authorized_risk_levels),
                 supports_structured_output=profile.supports_structured_output,
                 supports_tool_calling=profile.supports_tool_calling,
                 max_context_tokens=profile.max_context_tokens,
