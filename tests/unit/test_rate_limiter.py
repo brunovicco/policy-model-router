@@ -68,3 +68,38 @@ async def test_ping_is_a_no_op() -> None:
     limiter = InMemoryRateLimiter(max_requests=1, window_seconds=60)
 
     await limiter.ping()
+
+
+@pytest.mark.anyio
+async def test_evicts_the_oldest_key_once_the_tracked_key_limit_is_exceeded() -> None:
+    """Bounds memory when many distinct keys are seen, e.g. many client IPs over a long uptime."""
+    clock = _FakeClock()
+    limiter = InMemoryRateLimiter(
+        max_requests=10, window_seconds=60, time_source=clock, max_tracked_keys=2
+    )
+
+    await limiter.allow("key-a")
+    await limiter.allow("key-b")
+    await limiter.allow("key-c")
+
+    assert len(limiter._windows) == 2
+    assert "key-a" not in limiter._windows
+    assert "key-b" in limiter._windows
+    assert "key-c" in limiter._windows
+
+
+@pytest.mark.anyio
+async def test_touching_a_key_protects_it_from_eviction() -> None:
+    clock = _FakeClock()
+    limiter = InMemoryRateLimiter(
+        max_requests=10, window_seconds=60, time_source=clock, max_tracked_keys=2
+    )
+
+    await limiter.allow("key-a")
+    await limiter.allow("key-b")
+    await limiter.allow("key-a")  # touch key-a again, so key-b becomes the least-recent
+    await limiter.allow("key-c")
+
+    assert "key-a" in limiter._windows
+    assert "key-b" not in limiter._windows
+    assert "key-c" in limiter._windows

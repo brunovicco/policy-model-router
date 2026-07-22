@@ -149,7 +149,8 @@ Enforced by `scripts/validate_architecture.py` as part of the quality gate.
   `/health`/`/readyz` endpoints.
 - [ADR-0008](adr/0008-redis-shared-rate-limiter.md): optional Redis-backed rate limiter shared
   across replicas, fail-open at runtime, fail-closed at startup; amended to add a real-Redis
-  integration test (run in CI) and a `GET /metrics` counter for backend failures.
+  integration test (run in CI), a `GET /metrics` counter for backend failures, and (from a
+  security review) a hashed log key, a bounded in-memory limiter, and network/proxy-trust guidance.
 - [architecture-blueprint.md](architecture-blueprint.md): the data-classification authorization
   invariant this router enforces on behalf of the platform.
 
@@ -163,15 +164,20 @@ should not be assumed fixed:
 | No live availability signal | `AvailabilityProvider` (ADR-0006) is a real seam, but the only shipped implementation (`StaticAvailabilityProvider`) still just passes through the static YAML flag; nothing polls provider/gateway health | A group can be selected while its actual deployments are down; the policy file must be edited and the service redeployed to reflect an outage. Not resolved: no real health-check target exists yet to poll — adding one now would mean integrating against a system that isn't there |
 | `/readyz` is a shallow check | Returns ready once startup completed; there is no external dependency to probe (ADR-0004) | Cannot detect a policy that loaded successfully but is semantically wrong for the environment |
 | Redis-backed rate limiting has no metric beyond one counter | `/metrics` exposes only `policy_model_router_rate_limiter_backend_unavailable_total` (ADR-0008's amendment) | No visibility into allow/reject rates, latency, or the in-memory limiter; and nothing scrapes/alerts on the counter unless the deployment wires up its own Prometheus + alert rule — this repo only exposes the endpoint |
+| `/metrics` (and `/health`/`/readyz`) have no network-level restriction configured in this repo | Unauthenticated and unthrottled by design (ADR-0007), matching common health/scrape-probe practice; no ingress/mesh boundary is defined in `Dockerfile`/`docker-compose.yml` | Anyone who can reach the port can read metrics (minor recon: process/GC stats, one counter). Operators must restrict this at the ingress/mesh layer themselves — same as the existing "deploy `/route` behind an authenticated gateway" requirement |
+| Rate-limit key trusts only the raw TCP peer address | `entrypoints/http.py` never reads `X-Forwarded-For`/`Forwarded`; no `ProxyHeadersMiddleware`, no `--forwarded-allow-ips` | Behind a reverse proxy, every real client shares the proxy's IP as the key's IP component, collapsing per-client granularity to one bucket. A deployment that later enables proxy-header trust *without* restricting it to the proxy's own address would let any client forge the header and multiply its quota — a known misconfiguration to avoid, not current behavior |
 
 **Resolved:** the API key was a single shared secret for the whole service; ADR-0007's 2026-07-22
 amendment replaced it with per-agent keys (`API_KEYS`), so one agent's key can be rotated or
 revoked without affecting the others. Rate limiter state used to be per-process only; ADR-0008
 added an optional Redis-backed implementation shared across replicas, opt-in via `REDIS_URL`, later
 amended with a real-Redis integration test (`tests/integration/`, run against a `redis:7-alpine`
-service in CI) and a `GET /metrics` counter for backend failures. All three resolutions have
-documented residual limits above and in their ADRs — none is full IAM, a highly available
-rate-limiting service, or a complete metrics surface.
+service in CI) and a `GET /metrics` counter for backend failures. A security review of that work
+also found the rate-limit key (which embeds the client IP) logged in plain text on a Redis
+fail-open, and `InMemoryRateLimiter`'s tracked-key dict growing without bound; both are fixed
+(ADR-0008's second amendment: a hashed log fingerprint, and an `OrderedDict` capped at
+`RATE_LIMIT_MAX_TRACKED_KEYS`). All resolutions have documented residual limits above and in their
+ADRs — none is full IAM, a highly available rate-limiting service, or a complete metrics surface.
 
 Add fallback/scoring behavior, a live health check, or stronger identity/HA guarantees only against
 a concrete requirement (an incident, a threat model, or an evaluation dataset for tie-breaking) —

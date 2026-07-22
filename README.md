@@ -249,6 +249,7 @@ Other runtime settings:
 | `API_KEYS` | *(required)* | JSON object mapping each `agent_name` to its own API key, checked against the `X-API-Key` header on `POST /route`; the service refuses to start if unset, empty, or malformed |
 | `RATE_LIMIT_MAX_REQUESTS` | `60` | Requests allowed per `(client IP, agent_name)` pair per window |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window length, in seconds |
+| `RATE_LIMIT_MAX_TRACKED_KEYS` | `100000` | In-memory limiter only (ignored once `REDIS_URL` is set): caps distinct `(client IP, agent_name)` keys held in memory, evicting the least-recently-touched one past this limit |
 | `REDIS_URL` | *(unset)* | Optional. Shares the rate limit across replicas via Redis (ADR-0008); requires `uv sync --extra rate-limit`. Unset keeps the default in-memory, per-process limiter |
 
 ## Authentication and rate limiting
@@ -264,12 +265,21 @@ as this agent," or identity assurance stronger than "knew the right key" — see
 
 It is also rate-limited per `(client IP, agent_name)` pair (`RATE_LIMIT_MAX_REQUESTS` per
 `RATE_LIMIT_WINDOW_SECONDS`); exceeding it returns `429 rate_limit_exceeded`. By default this is an
-in-memory, fixed-window counter, **per process** — a multi-instance deployment enforces the limit
-per instance, not cluster-wide (ADR-0007). Set `REDIS_URL` (and install `uv sync --extra
-rate-limit`) to share the limit across replicas instead; run `docker compose up -d redis` for a
-local instance. The Redis-backed limiter fails open on a backend error (it allows the request
-rather than blocking routing traffic on an unrelated outage) but fails the service closed at
-startup if the configured Redis is unreachable (ADR-0008).
+in-memory, fixed-window counter, **per process**, bounded to `RATE_LIMIT_MAX_TRACKED_KEYS` distinct
+keys — a multi-instance deployment enforces the limit per instance, not cluster-wide (ADR-0007).
+Set `REDIS_URL` (and install `uv sync --extra rate-limit`) to share the limit across replicas
+instead; run `docker compose up -d redis` for a local instance. The Redis-backed limiter fails open
+on a backend error (it allows the request rather than blocking routing traffic on an unrelated
+outage) but fails the service closed at startup if the configured Redis is unreachable (ADR-0008).
+
+The rate-limit key's IP component is always the raw TCP peer address — this service never reads
+`X-Forwarded-For`/`Forwarded`. Behind a reverse proxy, every real client shares the proxy's IP,
+collapsing per-client granularity to one shared bucket; if you need real per-client granularity in
+that topology, configure the proxy to pass a trusted header and configure Uvicorn/Starlette to
+trust only that specific hop (e.g. `--forwarded-allow-ips` scoped to the proxy's address) — never
+trust forwarded headers from an unrestricted set of peers, or any client could forge the header and
+multiply its quota. See [ADR-0008's second amendment](docs/adr/0008-redis-shared-rate-limiter.md)
+for the full rationale.
 
 ## Availability
 
@@ -293,6 +303,10 @@ log line alone. None of these three endpoints requires `X-API-Key` or counts aga
 limit, so orchestrators and scrapers can probe them cheaply. `/readyz` is a shallow check: this
 service has no external dependency to probe, so "ready" means "startup completed," not "a
 downstream system is healthy."
+
+None of the three is restricted at the network layer by this repository — that's an ingress/mesh
+concern, the same way deploying `/route` behind an authenticated gateway is. In production,
+restrict `/metrics` (and, more loosely, `/health`/`/readyz`) to internal scrapers/orchestrators.
 
 ## Container
 
