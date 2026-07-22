@@ -255,6 +255,7 @@ Outras configurações de runtime:
 | `API_KEYS` | *(obrigatória)* | Objeto JSON mapeando cada `agent_name` à sua própria chave, comparada ao header `X-API-Key` em `POST /route`; o serviço recusa iniciar se estiver ausente, vazia ou malformada |
 | `RATE_LIMIT_MAX_REQUESTS` | `60` | Requisições permitidas por par `(IP do cliente, agent_name)` por janela |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Duração da janela de rate limit, em segundos |
+| `RATE_LIMIT_MAX_TRACKED_KEYS` | `100000` | Só para o limitador em memória (ignorado quando `REDIS_URL` está definida): limita quantas chaves `(IP do cliente, agent_name)` distintas ficam em memória, descartando a menos usada recentemente ao ultrapassar o limite |
 | `REDIS_URL` | *(ausente)* | Opcional. Compartilha o rate limit entre réplicas via Redis (ADR-0008); requer `uv sync --extra rate-limit`. Se ausente, mantém o limitador padrão em memória, por processo |
 
 ## Autenticação e rate limiting
@@ -270,13 +271,22 @@ demais. Isso ainda não é um IAM completo: não há expiração de chave, escop
 
 Também há rate limiting por par `(IP do cliente, agent_name)` (`RATE_LIMIT_MAX_REQUESTS` por
 `RATE_LIMIT_WINDOW_SECONDS`); ultrapassar o limite retorna `429 rate_limit_exceeded`. Por padrão é
-um contador em memória, de janela fixa, **por processo** — um deployment com múltiplas instâncias
-aplica o limite por instância, não de forma global no cluster (ADR-0007). Defina `REDIS_URL` (e
-instale `uv sync --extra rate-limit`) para compartilhar o limite entre réplicas; use
-`docker compose up -d redis` para uma instância local. O limitador com Redis falha aberto em caso
-de erro no backend (permite a requisição em vez de bloquear o tráfego de roteamento por uma
-indisponibilidade não relacionada), mas falha fechado na inicialização se o Redis configurado
-estiver inacessível (ADR-0008).
+um contador em memória, de janela fixa, **por processo**, limitado a `RATE_LIMIT_MAX_TRACKED_KEYS`
+chaves distintas — um deployment com múltiplas instâncias aplica o limite por instância, não de
+forma global no cluster (ADR-0007). Defina `REDIS_URL` (e instale `uv sync --extra rate-limit`)
+para compartilhar o limite entre réplicas; use `docker compose up -d redis` para uma instância
+local. O limitador com Redis falha aberto em caso de erro no backend (permite a requisição em vez
+de bloquear o tráfego de roteamento por uma indisponibilidade não relacionada), mas falha fechado
+na inicialização se o Redis configurado estiver inacessível (ADR-0008).
+
+O componente de IP da chave de rate limit é sempre o endereço bruto do peer TCP — este serviço
+nunca lê `X-Forwarded-For`/`Forwarded`. Atrás de um proxy reverso, todo cliente real compartilha o
+IP do proxy, colapsando a granularidade por cliente em um único balde; se precisar de granularidade
+real por cliente nessa topologia, configure o proxy para repassar um header confiável e configure o
+Uvicorn/Starlette para confiar apenas nesse salto específico (ex.: `--forwarded-allow-ips` restrito
+ao endereço do proxy) — nunca confie em headers repassados vindos de um conjunto irrestrito de
+peers, ou qualquer cliente poderia forjar o header e multiplicar sua cota. Veja a
+[segunda emenda da ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md) para o racional completo.
 
 ## Disponibilidade
 
@@ -300,6 +310,11 @@ réplicas) para detectar uma indisponibilidade prolongada em vez de depender só
 rate limit, então orquestradores e scrapers podem monitorá-los sem custo. `/readyz` é uma checagem
 rasa: este serviço não tem dependência externa para verificar, então "pronto" significa
 "inicialização concluída", não "um sistema posterior está saudável".
+
+Nenhum dos três é restrito na camada de rede por este repositório — isso é uma preocupação de
+ingress/mesh, da mesma forma que colocar `/route` atrás de um gateway autenticado é. Em produção,
+restrinja `/metrics` (e, de forma mais leve, `/health`/`/readyz`) a scrapers/orquestradores
+internos.
 
 ## Container
 

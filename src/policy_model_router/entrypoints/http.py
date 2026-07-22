@@ -44,6 +44,7 @@ _SERVICE_NAME = "policy-model-router"
 _DEFAULT_ROUTING_POLICY_PATH = "config/routing_policy.yaml"
 _DEFAULT_RATE_LIMIT_MAX_REQUESTS = 60
 _DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_DEFAULT_RATE_LIMIT_MAX_TRACKED_KEYS = 100_000
 
 
 class RateLimiter(Protocol):
@@ -124,7 +125,14 @@ def _build_rate_limiter(*, max_requests: int, window_seconds: float) -> RateLimi
     """
     redis_url = os.environ.get("REDIS_URL", "")
     if not redis_url:
-        return InMemoryRateLimiter(max_requests=max_requests, window_seconds=window_seconds)
+        max_tracked_keys = int(
+            os.environ.get("RATE_LIMIT_MAX_TRACKED_KEYS", _DEFAULT_RATE_LIMIT_MAX_TRACKED_KEYS)
+        )
+        return InMemoryRateLimiter(
+            max_requests=max_requests,
+            window_seconds=window_seconds,
+            max_tracked_keys=max_tracked_keys,
+        )
 
     try:
         from redis.asyncio import Redis

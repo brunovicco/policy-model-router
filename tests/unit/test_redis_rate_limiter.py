@@ -7,6 +7,7 @@ verify its counting and fail-open behavior.
 """
 
 import pytest
+from structlog.testing import capture_logs
 
 from policy_model_router.adapters.redis_rate_limiter import (
     BACKEND_UNAVAILABLE_TOTAL,
@@ -114,6 +115,22 @@ async def test_allow_increments_the_backend_unavailable_counter_on_failure() -> 
     await limiter.allow("key")
 
     assert _counter_value() == before + 1
+
+
+@pytest.mark.anyio
+async def test_allow_never_logs_the_raw_key_on_failure() -> None:
+    """The key embeds the caller's IP (see entrypoints/http.py); only a fingerprint is logged."""
+    limiter = RedisRateLimiter(_FailingClient(), max_requests=1, window_seconds=60)
+    raw_key = "203.0.113.5:credit-analysis-agent"
+
+    with capture_logs() as logs:
+        await limiter.allow(raw_key)
+
+    assert len(logs) == 1
+    assert logs[0]["event"] == "rate_limiter_backend_unavailable"
+    assert "key" not in logs[0]
+    assert raw_key not in repr(logs[0])
+    assert logs[0]["key_fingerprint"] != raw_key
 
 
 @pytest.mark.anyio

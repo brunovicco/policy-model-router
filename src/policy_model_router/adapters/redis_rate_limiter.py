@@ -10,6 +10,7 @@ increments a Prometheus counter exposed on ``GET /metrics``, so an extended outa
 rather than only discoverable in logs (ADR-0008's amendment).
 """
 
+import hashlib
 from typing import Any
 
 import structlog
@@ -24,6 +25,17 @@ BACKEND_UNAVAILABLE_TOTAL = Counter(
     "Requests where the Redis-backed rate limiter failed open because its backend was "
     "unreachable. A sustained increase means the rate limit is not being enforced.",
 )
+
+
+def _fingerprint(key: str) -> str:
+    """Return a short, non-reversible fingerprint of ``key`` for correlation in logs.
+
+    Never log ``key`` itself: it embeds the caller's IP address
+    (``entrypoints/http.py``'s ``rate_limit_key``), which is personal data per
+    ``.claude/rules/security-privacy.md``. The fingerprint still lets an operator tell whether
+    repeated failures come from the same key or many different ones, without recovering the IP.
+    """
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
 class RedisRateLimiter:
@@ -58,7 +70,7 @@ class RedisRateLimiter:
                 await self._client.expire(full_key, int(self._window_seconds))
         except Exception:
             BACKEND_UNAVAILABLE_TOTAL.inc()
-            logger.warning("rate_limiter_backend_unavailable", key=key)
+            logger.warning("rate_limiter_backend_unavailable", key_fingerprint=_fingerprint(key))
             return True
         return bool(count <= self._max_requests)
 

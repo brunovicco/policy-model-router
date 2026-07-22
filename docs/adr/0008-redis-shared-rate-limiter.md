@@ -107,3 +107,53 @@ needs a query that sums across instances (e.g. `sum(increase(...[5m])) > 0`), no
 instance's value. No metric exists yet for the in-memory limiter or for `/route` outcomes more
 broadly (allowed/rejected counts, latency); adding those is future work against a concrete need,
 not speculative.
+
+## Amendment (2026-07-22, second): security review follow-ups
+
+`/security-review` on the merged PR confirmed the design above and raised four items; two were
+fixed here, two are documentation-only because fixing them in code would mean guessing at
+deployment topology this repository doesn't control.
+
+**Fixed: the rate-limit key (which embeds the caller's IP) was logged in plain text on fail-open.**
+`RedisRateLimiter.allow`'s `except` branch logged `key=key` - the full `f"{client_ip}:{agent_name}"`
+string built in `entrypoints/http.py` - violating `.claude/rules/security-privacy.md` ("Redact by
+allowlist; never dump arbitrary objects or payloads") and leaving no entry in `docs/PRIVACY.md` for
+an IP address now durably stored by whatever log system ingests this service's stdout. Fixed by
+logging `key_fingerprint` - `hashlib.sha256(key).hexdigest()[:12]` - instead: an operator can still
+tell whether repeated failures come from the same key or many different ones, but cannot recover
+the IP from the log. `tests/unit/test_redis_rate_limiter.py::test_allow_never_logs_the_raw_key_on_failure`
+asserts the raw key never appears in the captured log event.
+
+**Fixed: `InMemoryRateLimiter._windows` had no eviction, so it grew without bound.** This predates
+ADR-0008 (it's ADR-0007's original limiter) but the review's proxy-spoofing hypothesis below made
+the memory-growth angle concrete enough to close now rather than leave open indefinitely. The dict
+became an `OrderedDict` capped at `RATE_LIMIT_MAX_TRACKED_KEYS` (default 100,000; configurable, and
+ignored once `REDIS_URL` is set - Redis manages its own memory via the `EXPIRE` on each key), moving
+a key to the end on every touch and evicting the least-recently-touched key once the cap is
+exceeded. An attacker who could vary the observed key without bound (see the next item) can no
+longer grow this process's memory without bound in step.
+
+**Documented, not coded: `/metrics` should be network-restricted to internal scrapers in
+production.** Like `/health` and `/readyz`, it is deliberately unauthenticated and unthrottled at
+the application layer so orchestrators/scrapers can reach it cheaply; this repository does not
+configure an ingress or network boundary for any of the three, and none exists in
+`Dockerfile`/`docker-compose.yml`. Operators should restrict `/metrics` (and, more loosely,
+`/health`/`/readyz`) to internal networks at the ingress/mesh layer, the same way `/route` is
+already documented as needing an authenticated gateway in front of it. No code change: the
+right boundary is a deployment concern, not something this service can enforce on itself.
+
+**Documented, not coded: the rate-limit key trusts only the raw TCP peer address, never a proxy
+header.** `entrypoints/http.py`'s `rate_limit_key` uses `http_request.client.host` directly; Uvicorn
+is not configured with `--proxy-headers`/`--forwarded-allow-ips`, and no `ProxyHeadersMiddleware` is
+installed. Today this means: behind a reverse proxy, every real client's requests carry the proxy's
+own IP as the key's IP component, collapsing per-client granularity to one shared bucket per proxy
+- not attacker-spoofable as things stand, but also not doing what the `(client IP, agent_name)`
+granularity promises in that topology. The hypothesis raised in review - that enabling proxy-header
+trust *without* restricting it to a specific trusted hop would let any client forge
+`X-Forwarded-For` and multiply its effective quota - is accurate but describes a future
+misconfiguration, not current behavior; guessing at a specific deployment's proxy topology and
+coding for it here would be speculative. Documented instead: a deployment that sits behind a
+reverse proxy and wants real per-client granularity must configure the proxy to pass a trusted
+header and configure Uvicorn/Starlette to trust only that specific hop (e.g. `--forwarded-allow-ips`
+scoped to the proxy's own address) - never trust forwarded headers from an unrestricted set of
+peers.
