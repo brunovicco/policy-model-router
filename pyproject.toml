@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13,<3.15"
 dependencies = [
     "fastapi>=0.115",
+    "prometheus-client>=0.25.0",
     "pydantic>=2.11",
     "pydantic-settings>=2.8",
     "pyyaml>=6.0",
@@ -17,6 +18,12 @@ dependencies = [
 # Opt-in LLM tracing; see docs/LLM_OBSERVABILITY.md. Install with `uv sync --extra tracing`.
 tracing = [
     "langfuse>=3.0",
+]
+# Opt-in Redis-backed, cross-replica rate limiting; see ADR-0008. Install with
+# `uv sync --extra rate-limit`. Without it (or without REDIS_URL set), the service falls back to
+# the default in-memory, per-process limiter.
+rate-limit = [
+    "redis>=5.0",
 ]
 
 [dependency-groups]
@@ -100,6 +107,12 @@ disallow_untyped_decorators = false
 # langfuse is the optional "tracing" extra; not installed by default, so no
 # stubs are available unless a project opts in with `uv sync --extra tracing`.
 module = ["langfuse"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# redis is the optional "rate-limit" extra; not installed by default, so no
+# stubs are available unless a project opts in with `uv sync --extra rate-limit`.
+module = ["redis.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

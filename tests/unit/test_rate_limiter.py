@@ -4,6 +4,8 @@ Uses an injectable time source instead of real sleeps, per ``.claude/rules/testi
 sleep-based synchronization ... in tests").
 """
 
+import pytest
+
 from policy_model_router.adapters.rate_limiter import InMemoryRateLimiter
 
 
@@ -23,35 +25,46 @@ class _FakeClock:
         self._now += seconds
 
 
-def test_allows_requests_up_to_the_limit_within_one_window() -> None:
+@pytest.mark.anyio
+async def test_allows_requests_up_to_the_limit_within_one_window() -> None:
     clock = _FakeClock()
     limiter = InMemoryRateLimiter(max_requests=2, window_seconds=60, time_source=clock)
 
-    assert limiter.allow("key") is True
-    assert limiter.allow("key") is True
+    assert await limiter.allow("key") is True
+    assert await limiter.allow("key") is True
 
 
-def test_rejects_a_request_exceeding_the_limit_within_one_window() -> None:
+@pytest.mark.anyio
+async def test_rejects_a_request_exceeding_the_limit_within_one_window() -> None:
     clock = _FakeClock()
     limiter = InMemoryRateLimiter(max_requests=1, window_seconds=60, time_source=clock)
 
-    assert limiter.allow("key") is True
-    assert limiter.allow("key") is False
+    assert await limiter.allow("key") is True
+    assert await limiter.allow("key") is False
 
 
-def test_resets_the_count_after_the_window_elapses() -> None:
+@pytest.mark.anyio
+async def test_resets_the_count_after_the_window_elapses() -> None:
     clock = _FakeClock()
     limiter = InMemoryRateLimiter(max_requests=1, window_seconds=60, time_source=clock)
 
-    assert limiter.allow("key") is True
+    assert await limiter.allow("key") is True
     clock.advance(61)
-    assert limiter.allow("key") is True
+    assert await limiter.allow("key") is True
 
 
-def test_tracks_each_key_independently() -> None:
+@pytest.mark.anyio
+async def test_tracks_each_key_independently() -> None:
     clock = _FakeClock()
     limiter = InMemoryRateLimiter(max_requests=1, window_seconds=60, time_source=clock)
 
-    assert limiter.allow("key-a") is True
-    assert limiter.allow("key-b") is True
-    assert limiter.allow("key-a") is False
+    assert await limiter.allow("key-a") is True
+    assert await limiter.allow("key-b") is True
+    assert await limiter.allow("key-a") is False
+
+
+@pytest.mark.anyio
+async def test_ping_is_a_no_op() -> None:
+    limiter = InMemoryRateLimiter(max_requests=1, window_seconds=60)
+
+    await limiter.ping()

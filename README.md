@@ -249,6 +249,7 @@ Other runtime settings:
 | `API_KEYS` | *(required)* | JSON object mapping each `agent_name` to its own API key, checked against the `X-API-Key` header on `POST /route`; the service refuses to start if unset, empty, or malformed |
 | `RATE_LIMIT_MAX_REQUESTS` | `60` | Requests allowed per `(client IP, agent_name)` pair per window |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window length, in seconds |
+| `REDIS_URL` | *(unset)* | Optional. Shares the rate limit across replicas via Redis (ADR-0008); requires `uv sync --extra rate-limit`. Unset keeps the default in-memory, per-process limiter |
 
 ## Authentication and rate limiting
 
@@ -261,11 +262,14 @@ as this agent," or identity assurance stronger than "knew the right key" — see
 [ADR-0007's amendment](docs/adr/0007-http-boundary-hardening.md) for what a stronger mechanism
 (mTLS, OAuth2 client credentials) would add.
 
-It is also rate-limited per `(client IP, agent_name)` pair, using an in-memory, fixed-window
-counter (`RATE_LIMIT_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS`); exceeding it returns
-`429 rate_limit_exceeded`. This state is **per process**, not shared across replicas — a
-multi-instance deployment enforces the limit per instance, not cluster-wide. See
-[ADR-0007](docs/adr/0007-http-boundary-hardening.md) for the full rationale and residual gaps.
+It is also rate-limited per `(client IP, agent_name)` pair (`RATE_LIMIT_MAX_REQUESTS` per
+`RATE_LIMIT_WINDOW_SECONDS`); exceeding it returns `429 rate_limit_exceeded`. By default this is an
+in-memory, fixed-window counter, **per process** — a multi-instance deployment enforces the limit
+per instance, not cluster-wide (ADR-0007). Set `REDIS_URL` (and install `uv sync --extra
+rate-limit`) to share the limit across replicas instead; run `docker compose up -d redis` for a
+local instance. The Redis-backed limiter fails open on a backend error (it allows the request
+rather than blocking routing traffic on an unrelated outage) but fails the service closed at
+startup if the configured Redis is unreachable (ADR-0008).
 
 ## Availability
 
@@ -276,13 +280,19 @@ application layer resolves it through an `AvailabilityProvider` port
 health check yet — the port exists so one can be added later as a new adapter, without changing the
 routing use case or the domain constraints.
 
-## Health and readiness
+## Health, readiness, and metrics
 
 `GET /health` always returns `200 {"status": "ok"}` once the process is serving requests. `GET
 /readyz` returns `200 {"status": "ready"}` once the routing policy loaded successfully at startup.
-Neither endpoint requires `X-API-Key` or counts against the rate limit, so orchestrators and load
-balancers can probe them cheaply. `/readyz` is a shallow check: this service has no external
-dependency to probe, so "ready" means "startup completed," not "a downstream system is healthy."
+`GET /metrics` returns Prometheus-format output, today limited to
+`policy_model_router_rate_limiter_backend_unavailable_total` — a counter incremented every time
+the Redis-backed rate limiter fails open because Redis was unreachable; alert on
+`increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (summed across
+replicas) to catch a sustained outage instead of relying on the `rate_limiter_backend_unavailable`
+log line alone. None of these three endpoints requires `X-API-Key` or counts against the rate
+limit, so orchestrators and scrapers can probe them cheaply. `/readyz` is a shallow check: this
+service has no external dependency to probe, so "ready" means "startup completed," not "a
+downstream system is healthy."
 
 ## Container
 
@@ -310,7 +320,8 @@ domain      -> no outer layer
   constraint predicates;
 - `application`: deterministic routing use case and clock/ID/availability ports;
 - `adapters`: YAML policy loader, system clock, UUID generator, static availability provider,
-  in-memory rate limiter, and opt-in tracing support;
+  in-memory rate limiter (default) and optional Redis-backed rate limiter, and opt-in tracing
+  support;
 - `entrypoints`: Pydantic wire contracts, FastAPI endpoints (`/route`, `/health`, `/readyz`), error
   mapping, and structured logging.
 
@@ -319,8 +330,9 @@ The policy is loaded once at startup, and request handling is stateless. See
 [ADR index](docs/ARCHITECTURE.md#related-decisions) for why the provider boundary
 ([ADR-0004](docs/adr/0004-litellm-provider-boundary.md)), the routing algorithm
 ([ADR-0005](docs/adr/0005-deterministic-policy-routing.md)), the availability seam
-([ADR-0006](docs/adr/0006-availability-provider-port.md)), and the HTTP boundary hardening
-([ADR-0007](docs/adr/0007-http-boundary-hardening.md)) look the way they do.
+([ADR-0006](docs/adr/0006-availability-provider-port.md)), the HTTP boundary hardening
+([ADR-0007](docs/adr/0007-http-boundary-hardening.md)), and the optional shared rate limiter
+([ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md)) look the way they do.
 
 ## Current scope
 
@@ -335,7 +347,8 @@ The MVP intentionally does not:
 - provide full IAM: per-agent `API_KEYS` authenticate a claimed `agent_name` but have no expiry,
   scoping, or identity assurance beyond "knew the right key" (see
   [Authentication and rate limiting](#authentication-and-rate-limiting));
-- share rate-limit state across replicas; each instance enforces its own limit.
+- share rate-limit state across replicas *by default*; that requires opting into `REDIS_URL`, which
+  in turn adds Redis as a real infrastructure dependency with its own availability to manage.
 
 These boundaries keep policy decisions explicit. Add fallback, scoring, a live health check, or
 per-agent/shared-state auth and rate limiting only when there is evaluation data or a concrete

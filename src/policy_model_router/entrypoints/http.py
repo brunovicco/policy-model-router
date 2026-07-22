@@ -1,10 +1,10 @@
-"""HTTP entrypoint: ``POST /route``, plus ``/health``/``/readyz`` and boundary hardening.
+"""HTTP entrypoint: ``POST /route``, plus ``/health``, ``/readyz``, and ``/metrics``.
 
 The model-routing decision endpoint agents call over HTTP before every LLM call. Per ADR-0004,
 this service is infrastructure, not an A2A agent: agents call it directly, it is not discovered
 through Agent Cards or the A2A protocol. Per ADR-0007 (amended), ``/route`` requires a per-agent
-API key and is rate-limited per (client IP, agent) pair; ``/health`` and ``/readyz`` are
-unauthenticated and unthrottled so orchestrators can probe them cheaply.
+API key and is rate-limited per (client IP, agent) pair; ``/health``, ``/readyz``, and ``/metrics``
+are unauthenticated and unthrottled so orchestrators and scrapers can probe them cheaply.
 """
 
 import json
@@ -14,16 +14,18 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Protocol
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from policy_model_router.adapters.availability import StaticAvailabilityProvider
 from policy_model_router.adapters.clock import SystemClock
 from policy_model_router.adapters.id_generator import Uuid4IdGenerator
 from policy_model_router.adapters.rate_limiter import InMemoryRateLimiter, RateLimitExceededError
+from policy_model_router.adapters.redis_rate_limiter import RedisRateLimiter
 from policy_model_router.adapters.routing_policy_loader import load_routing_policy
 from policy_model_router.application.route_model import (
     IncompleteRoutingPolicyError,
@@ -42,6 +44,29 @@ _SERVICE_NAME = "policy-model-router"
 _DEFAULT_ROUTING_POLICY_PATH = "config/routing_policy.yaml"
 _DEFAULT_RATE_LIMIT_MAX_REQUESTS = 60
 _DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60.0
+
+
+class RateLimiter(Protocol):
+    """Port for admitting or rejecting one more request for a given key.
+
+    Defined here, not in ``application/ports.py``: this protects the HTTP boundary only - the
+    application use case never rate-limits anything - so the consumer-side port lives next to its
+    only consumer, this module. Two implementations exist: ``InMemoryRateLimiter`` (default,
+    per-process) and the optional, Redis-backed ``RedisRateLimiter`` shared across replicas
+    (ADR-0008).
+    """
+
+    async def allow(self, key: str) -> bool:
+        """Return whether one more request for ``key`` is within its current limit."""
+        ...
+
+    async def ping(self) -> None:
+        """Verify the limiter's backend is reachable; raise if it is not.
+
+        Called once at startup so a misconfigured backend fails the service closed immediately,
+        rather than surfacing as a per-request failure later.
+        """
+        ...
 
 
 class AuthenticationError(Exception):
@@ -89,11 +114,36 @@ def _required_api_keys() -> dict[str, str]:
     return parsed
 
 
+def _build_rate_limiter(*, max_requests: int, window_seconds: float) -> RateLimiter:
+    """Build the configured rate limiter.
+
+    Redis-backed and shared across replicas if ``REDIS_URL`` is set (ADR-0008); otherwise the
+    default in-memory, per-process limiter. Raises ``RuntimeError`` (fail closed) if ``REDIS_URL``
+    is set but the optional ``redis`` package is not installed - a silent fallback to per-process
+    behavior would defeat the reason the operator configured it.
+    """
+    redis_url = os.environ.get("REDIS_URL", "")
+    if not redis_url:
+        return InMemoryRateLimiter(max_requests=max_requests, window_seconds=window_seconds)
+
+    try:
+        from redis.asyncio import Redis
+    except ImportError as exc:
+        raise RuntimeError(
+            "REDIS_URL is set but the 'redis' package is not installed; "
+            "install it with `uv sync --extra rate-limit`"
+        ) from exc
+
+    client = Redis.from_url(redis_url, socket_connect_timeout=2.0, socket_timeout=2.0)
+    return RedisRateLimiter(client, max_requests=max_requests, window_seconds=window_seconds)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Configure logging and load the routing policy, API key, and rate limiter at startup.
+    """Configure logging and load the routing policy, API keys, and rate limiter at startup.
 
-    Fails fast if the routing policy is missing/invalid or the API key is not configured.
+    Fails fast if the routing policy is missing/invalid, the API keys are not configured, or the
+    rate limiter's backend (when Redis-backed) is not reachable.
     """
     configure_logging(
         service=_SERVICE_NAME,
@@ -108,7 +158,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         availability=StaticAvailabilityProvider(),
     )
     app.state.api_keys = _required_api_keys()
-    app.state.rate_limiter = InMemoryRateLimiter(
+
+    rate_limiter = _build_rate_limiter(
         max_requests=int(
             os.environ.get("RATE_LIMIT_MAX_REQUESTS", _DEFAULT_RATE_LIMIT_MAX_REQUESTS)
         ),
@@ -116,6 +167,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             os.environ.get("RATE_LIMIT_WINDOW_SECONDS", _DEFAULT_RATE_LIMIT_WINDOW_SECONDS)
         ),
     )
+    try:
+        await rate_limiter.ping()
+    except Exception as exc:
+        raise RuntimeError(f"rate limiter backend is not reachable: {exc}") from exc
+    app.state.rate_limiter = rate_limiter
+
     yield
 
 
@@ -211,6 +268,17 @@ async def readyz(request: Request) -> dict[str, str]:
     return {"status": "ready"}
 
 
+@app.get("/metrics")
+async def metrics() -> Response:
+    """Expose Prometheus-format metrics, including the Redis rate limiter's failure counter.
+
+    Includes ``policy_model_router_rate_limiter_backend_unavailable_total`` (ADR-0008's
+    amendment): alert on a sustained increase, which means the Redis-backed rate limiter is
+    failing open and the configured limit is not being enforced.
+    """
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.post("/route", response_model=ModelRouteDecision)
 async def route(
     request: ModelRouteRequest,
@@ -223,7 +291,7 @@ async def route(
 
     client_host = http_request.client.host if http_request.client else "unknown"
     rate_limit_key = f"{client_host}:{request.agent_name}"
-    if not http_request.app.state.rate_limiter.allow(rate_limit_key):
+    if not await http_request.app.state.rate_limiter.allow(rate_limit_key):
         raise RateLimitExceededError(f"rate limit exceeded for {rate_limit_key!r}")
 
     decision = use_case.route(to_domain_request(request))
