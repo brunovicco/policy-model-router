@@ -78,3 +78,24 @@ in their own logic (relying on this router to be permissive) must now expect `PO
 reject high-risk requests mapped to lower-tier groups, and should route those workflows through a
 workload/policy configuration that maps to `reasoning-strong` if `critical`-risk traffic is
 expected.
+
+## Amendment (2026-07-23): `check_context_window` accounts for expected output tokens
+
+This ADR originally shipped `check_context_window` comparing only `context_tokens_estimated`
+(input) against `profile.max_context_tokens`, ignoring `max_output_tokens_estimated` entirely even
+though that field already existed on `RouteRequest` and was already used by `check_max_cost`. A
+group's context window bounds input and output tokens together, not input alone; a group with a
+64k window could accept a request whose input and expected output together exceed 64k, as long as
+input alone stayed under the limit.
+
+**Decision.** `check_context_window` now compares `context_tokens_estimated +
+max_output_tokens_estimated` against `profile.max_context_tokens`. No new `ReasonCode` was
+introduced - this is corrected arithmetic for the same failure category
+(`CONTEXT_WINDOW_EXCEEDED`), not a new constraint. `ConstraintFailure.message`/`observed_value` now
+report the combined total plus its input/output breakdown, instead of input alone.
+
+**Consequences.** This is a behavior change: some requests whose input alone fit a group's window,
+but whose input plus expected output does not, are now rejected where they previously were not.
+Callers that estimate `max_output_tokens_estimated` generously (as a safety margin rather than a
+real expectation) will see more `context_window_exceeded` rejections against groups with a window
+close to their input size, and should tighten that estimate or route to a larger-window group.

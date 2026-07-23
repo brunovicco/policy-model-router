@@ -140,22 +140,36 @@ def test_tool_calling_rejects_when_required_but_unsupported(
     assert check_tool_calling(make_request(), profile, rule) is not None
 
 
-def test_context_window_passes_when_within_limit(
+def test_context_window_passes_when_input_and_output_fit(
     make_request: MakeRequest, make_profile: MakeProfile, make_rule: MakeRule
 ) -> None:
-    request = make_request(context_tokens_estimated=1_000)
+    request = make_request(context_tokens_estimated=800, max_output_tokens_estimated=200)
     profile = make_profile(max_context_tokens=1_000)
 
     assert check_context_window(request, profile, make_rule()) is None
 
 
-def test_context_window_rejects_when_exceeded(
+def test_context_window_rejects_when_input_alone_exceeds_the_limit(
     make_request: MakeRequest, make_profile: MakeProfile, make_rule: MakeRule
 ) -> None:
-    request = make_request(context_tokens_estimated=1_001)
+    request = make_request(context_tokens_estimated=1_001, max_output_tokens_estimated=0)
     profile = make_profile(max_context_tokens=1_000)
 
     assert check_context_window(request, profile, make_rule()) is not None
+
+
+def test_context_window_rejects_when_input_fits_but_input_plus_output_does_not(
+    make_request: MakeRequest, make_profile: MakeProfile, make_rule: MakeRule
+) -> None:
+    """Regression test: input alone fits the window, but expected output pushes it over."""
+    request = make_request(context_tokens_estimated=900, max_output_tokens_estimated=200)
+    profile = make_profile(max_context_tokens=1_000)
+
+    failure = check_context_window(request, profile, make_rule())
+
+    assert failure is not None
+    assert failure.observed_value == "1100"
+    assert failure.required_value == "<= 1000"
 
 
 def test_max_cost_passes_when_within_ceiling(

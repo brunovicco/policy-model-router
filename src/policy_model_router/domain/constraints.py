@@ -103,16 +103,23 @@ def check_tool_calling(
 def check_context_window(
     request: RouteRequest, profile: ModelGroupProfile, _rule: WorkloadRule
 ) -> ConstraintFailure | None:
-    """Reject a group whose context window is smaller than the estimated request context."""
-    if request.context_tokens_estimated <= profile.max_context_tokens:
+    """Reject a group whose context window can't fit the estimated input plus expected output.
+
+    A model's context window bounds input and output tokens together, not input alone: a group
+    with a 128k window can't serve a call with 120k input tokens and 20k expected output tokens
+    just because 120k <= 128k.
+    """
+    total_tokens = request.context_tokens_estimated + request.max_output_tokens_estimated
+    if total_tokens <= profile.max_context_tokens:
         return None
     return ConstraintFailure(
         code=ReasonCode.CONTEXT_WINDOW_EXCEEDED,
         message=(
-            f"estimated context {request.context_tokens_estimated} tokens exceeds "
-            f"group limit of {profile.max_context_tokens} tokens"
+            f"estimated input+output {total_tokens} tokens (input "
+            f"{request.context_tokens_estimated} + output {request.max_output_tokens_estimated}) "
+            f"exceeds group limit of {profile.max_context_tokens} tokens"
         ),
-        observed_value=str(request.context_tokens_estimated),
+        observed_value=str(total_tokens),
         required_value=f"<= {profile.max_context_tokens}",
     )
 

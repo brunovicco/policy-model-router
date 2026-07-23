@@ -16,8 +16,9 @@ flowchart LR
     Router -.->|"loads at startup"| Policy["config/routing_policy.yaml"]
 ```
 
-Upstream dependency: none. The service reads only its own routing policy file; it has no database,
-queue, or outbound network call.
+Upstream dependency: none required. The service reads only its own routing policy file and has no
+database or queue; it does have one optional real network dependency - a Redis-backed rate limiter,
+used when `REDIS_URL` is configured (ADR-0008) - and none otherwise.
 
 Downstream dependency: none from this service's point of view. Callers are responsible for taking
 `selected_model_group` and resolving it to an actual provider/deployment/credential through their
@@ -25,7 +26,9 @@ own gateway. This service never calls a model and never sees prompts or completi
 
 `domain/enums.py` and `domain/routing.py` intentionally mirror the shape of
 `credit_desk_contracts.*` from the separate `multi-agent-credit-desk` monorepo without importing
-it, so this service has zero code dependency on that system while staying wire-compatible with it.
+it, so this service has zero code dependency on that system. The mirror was originally
+hand-maintained field-for-field; it has since diverged (ADR-0009, ADR-0010 added fields the
+external monorepo does not have yet) with no automated compatibility check - see Known gaps below.
 
 ## Layers
 
@@ -133,8 +136,9 @@ Enforced by `scripts/validate_architecture.py` as part of the quality gate.
 - **Money**: `Decimal` throughout - `ModelGroupProfile.input_cost_usd_per_million_tokens`/
   `output_cost_usd_per_million_tokens` and `RouteRequest.max_cost_usd` (ADR-0010).
 - **Decision provenance**: every `RouteDecision` carries `policy_id`/`policy_version`/
-  `policy_digest` (the loaded policy's identity, the last computed at load time from the raw YAML
-  bytes) and `service_version`/`environment` (the deployment's identity) (ADR-0009).
+  `policy_digest` (the loaded policy's identity, the last computed at load time from the policy
+  file's decoded text content) and `service_version`/`environment` (the deployment's identity)
+  (ADR-0009).
 - **Idempotency**: `POST /route` is a pure decision over caller-supplied input and the loaded
   policy; it has no side effects to deduplicate. `routing_decision_id` is generated per call and is
   not a dedupe key.

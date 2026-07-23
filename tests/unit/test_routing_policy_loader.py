@@ -185,3 +185,13 @@ def test_load_routing_policy_fails_closed_when_a_workload_is_missing(tmp_path: P
 
     with pytest.raises(RoutingPolicyLoadError):
         load_routing_policy(policy_path)
+
+
+def test_load_routing_policy_fails_closed_on_a_duplicate_top_level_key(tmp_path: Path) -> None:
+    """A second ``policy_version:`` must not silently overwrite the first (stock PyYAML default)."""
+    duplicated = _VALID_YAML + '\npolicy_version: "9.9.9"\n'
+    policy_path = tmp_path / "routing_policy.yaml"
+    policy_path.write_text(duplicated, encoding="utf-8")
+
+    with pytest.raises(RoutingPolicyLoadError):
+        load_routing_policy(policy_path)

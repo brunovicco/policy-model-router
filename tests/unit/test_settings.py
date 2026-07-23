@@ -108,3 +108,52 @@ def test_settings_is_immutable() -> None:
 
     with pytest.raises(pydantic.ValidationError):
         settings.app_env = "production"  # type: ignore[misc]  # intentional: proving frozen=True raises
+
+
+def test_settings_fails_closed_on_an_empty_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "")
+
+    with pytest.raises(pydantic.ValidationError, match="app_env"):
+        Settings()
+
+
+def test_settings_fails_closed_on_an_unknown_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "not-a-real-environment")
+
+    with pytest.raises(pydantic.ValidationError, match="app_env"):
+        Settings()
+
+
+def test_settings_fails_closed_on_an_unknown_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "NOPE")
+
+    with pytest.raises(pydantic.ValidationError, match="log_level"):
+        Settings()
+
+
+def test_settings_accepts_a_mixed_case_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "debug")
+
+    assert Settings().log_level == "DEBUG"
+
+
+def test_settings_fails_closed_on_an_unknown_log_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_FORMAT", "xml")
+
+    with pytest.raises(pydantic.ValidationError, match="log_format"):
+        Settings()
+
+
+def test_settings_accepts_a_mixed_case_log_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_FORMAT", "CONSOLE")
+
+    assert Settings().log_format == "console"
+
+
+def test_settings_fails_closed_on_an_infinite_rate_limit_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RATE_LIMIT_WINDOW_SECONDS", "inf")
+
+    with pytest.raises(pydantic.ValidationError, match="rate_limit_window_seconds"):
+        Settings()

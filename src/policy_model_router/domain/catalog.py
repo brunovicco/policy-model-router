@@ -67,8 +67,10 @@ class RoutingPolicy:
     """The full declarative routing policy: model-group catalog plus the workload table.
 
     ``policy_id``/``policy_version`` are declared in the YAML file itself and identify *which*
-    policy is loaded; ``policy_digest`` is computed by the loader from the raw file bytes
-    (``sha256:<hex>``) and identifies *exactly what content* was loaded, independent of whether
+    policy is loaded; ``policy_digest`` is computed by the loader from the file's decoded text
+    content (``sha256:<hex>``; line endings are normalized by Python's text-mode read, so CRLF and
+    LF variants of the same content hash identically) and identifies *exactly what content* was
+    loaded, independent of whether
     the author remembered to bump ``policy_version``. Both travel into every
     :class:`~policy_model_router.domain.routing.RouteDecision` so a decision is traceable back to
     the policy that produced it.
