@@ -201,9 +201,14 @@ the fail-open fingerprint was an unkeyed hash enumerable from log access alone; 
 client IP alone, and an HMAC-keyed fingerprint). `/route` previously exposed no metrics beyond the
 Redis failure counter and no decision provenance beyond a bare `routing_decision_id`; both are fixed
 (`GET /metrics` now includes per-outcome counters and a duration histogram, ADR-0009 added
-`policy_id`/`policy_version`/`policy_digest`/`service_version`/`environment` to every decision).
-`check_max_cost` previously compared one flat number per model group regardless of request size;
-ADR-0010 made it a function of the request's actual estimated input/output token counts. All
+`policy_id`/`policy_version`/`policy_digest`/`service_version`/`environment` to every decision). A
+further review found that provenance existed only on accepted decisions: a `no_viable_model_group`
+rejection carried none of it, and neither outcome emitted a structured log event; both are fixed
+(ADR-0009's amendment: `RejectedDecision` carries the same provenance as an accepted decision, the
+422 response gained an additive `decision` key, and `/route` now emits a `routing_decision`
+structured log event for both outcomes). `check_max_cost` previously compared one flat number per
+model group regardless of request size; ADR-0010 made it a function of the request's actual
+estimated input/output token counts. All
 resolutions have documented residual limits above and in their ADRs - none is full IAM, a highly
 available rate-limiting service, a complete metrics surface, or a live-pricing cost model.
 

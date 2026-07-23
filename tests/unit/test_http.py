@@ -245,6 +245,58 @@ def test_route_returns_the_decision_for_a_valid_request(client: TestClient) -> N
     assert body["environment"]
 
 
+def test_route_emits_a_routing_decision_log_event_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uses its own TestClient/capture_logs pair, entered together: the ``client`` fixture would
+    already have run the lifespan's ``configure_logging()`` before ``capture_logs`` could patch
+    structlog's processor chain, so no log line would be captured (see the sibling correlation-id
+    test for the same reason).
+    """
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    with TestClient(app) as test_client, capture_logs() as logs:
+        response = test_client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
+
+    assert response.status_code == 200
+    decision_logs = [log for log in logs if log["event"] == "routing_decision"]
+    assert len(decision_logs) == 1
+    log = decision_logs[0]
+    assert log["outcome"] == "accepted"
+    assert log["model_group"] == "reasoning-medium"
+    assert log["workflow_id"] == "workflow-1"
+    assert log["task_id"] == "task-1"
+    assert log["routing_decision_id"]
+    assert log["policy_id"]
+
+
+def test_route_emits_a_routing_decision_log_event_on_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    with TestClient(app) as test_client, capture_logs() as logs:
+        response = test_client.post(
+            "/route",
+            json=_valid_payload(workload="document_extraction", data_classification="confidential"),
+            headers=_AUTH_HEADERS,
+        )
+
+    assert response.status_code == 422
+    decision_logs = [log for log in logs if log["event"] == "routing_decision"]
+    assert len(decision_logs) == 1
+    log = decision_logs[0]
+    assert log["outcome"] == "rejected"
+    assert log["model_group"] == "fast-small"
+    assert log["reason_code"] == "data_classification_not_authorized"
+    assert log["routing_decision_id"]
+    assert log["policy_id"]
+
+
 def test_route_response_never_reveals_other_agents_allowlist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -324,6 +376,20 @@ def test_route_returns_a_stable_error_envelope_when_no_group_is_viable(client: T
     body = response.json()
     assert body["error"]["code"] == "no_viable_model_group"
     assert "fast-small" in body["error"]["message"]
+
+    decision = body["decision"]
+    assert decision["workload"] == "document_extraction"
+    assert decision["rejected_model_group"] == "fast-small"
+    assert decision["reason_code"] == "data_classification_not_authorized"
+    assert decision["observed_value"]
+    assert decision["required_value"]
+    assert decision["routing_decision_id"]
+    assert decision["decided_at"]
+    assert decision["policy_id"]
+    assert decision["policy_version"]
+    assert decision["policy_digest"].startswith("sha256:")
+    assert decision["service_version"]
+    assert decision["environment"]
 
 
 def test_route_rejects_a_request_missing_the_api_key(client: TestClient) -> None:

@@ -66,3 +66,49 @@ match.
   now made more urgent by this ADR rather than newly discovered by it.
 - No change to the routing algorithm itself (ADR-0005): this ADR is entirely about what a decision
   record proves after the fact, not how the decision is made.
+
+## Amendment (2026-07-23): rejection decisions gain the provenance this ADR always intended
+
+This ADR's original text (above) claimed `NoViableModelGroupError` "still carries the partial
+decision context via its own attributes" on the failure path. That was inaccurate against the
+shipped code: the exception carried only `workload`, `model_group`, `reason`, and `reason_code` -
+none of `routing_decision_id`, `decided_at`, or the five identity fields. A rejection's HTTP
+response was, and until this amendment remained, just `{"error": {"code": ..., "message": ...}}`.
+This amendment makes the code match what this ADR already committed to.
+
+**Decision.** `domain/routing.py` gains `RejectedDecision`, structurally parallel to
+`RouteDecision`: the same `routing_decision_id`/`decided_at` plus all five identity fields
+(`policy_id`/`policy_version`/`policy_digest`/`service_version`/`environment`), plus the
+rejection-specific `workload`, `rejected_model_group`, `reason`, `reason_code`, `observed_value`,
+`required_value`. `NoViableModelGroupError` now takes a single `decision: RejectedDecision`
+argument (built by `RouteModelUseCase.route` at the raise site, using the exact same
+`id_generator`/`clock`/policy/service-version/environment calls the success path already makes)
+instead of four separate positional arguments.
+
+`entrypoints/contracts.py` gains `RouteRejection` (mirroring `RejectedDecision` 1:1, same pattern
+as `ModelRouteDecision`/`RouteDecision`) and `from_domain_rejection`. The `no_viable_model_group`
+422 response now includes a `decision` key carrying `RouteRejection`'s full provenance, alongside
+the unchanged `error.code`/`error.message` - purely additive, the same non-breaking pattern this
+ADR's original decision used for the success contract.
+
+**A structured log event, for both outcomes.** `entrypoints/http.py`'s `/route` handler now emits
+a `"routing_decision"` structlog event (`outcome=accepted|rejected`) for every request, carrying
+`routing_decision_id`, `workflow_id`, `task_id`, `workload`, the relevant model group,
+`reason_code` (rejections only), the three policy identity fields, and `duration_ms`.
+`service`/`environment`/`version`/`correlation_id` need no explicit passing - already bound once
+via `structlog.contextvars` (`configure_logging` at startup, `bind_correlation_id` per request).
+This is deliberately a log line, not a durable/immutable audit store: no such infrastructure exists
+in this repository, and building one is separate, larger work than closing this provenance gap.
+
+**Not included**: a full breakdown of why every *other* (non-mapped) group also failed on the
+rejection path. `RouteModelUseCase.route` already computes this information before raising (it's
+needed for the success path's `rejected_candidates`), but attaching it to `RejectedDecision` too
+would restructure the evaluation loop for a benefit outside what was asked - a possible future
+enhancement, not built now.
+
+**Consequences.** `NoViableModelGroupError`'s public shape changed (one `decision` argument/
+attribute instead of four separate ones); every caller that inspected its old attributes needed
+updating - a one-time, mechanical migration (`tests/unit/test_route_model.py`'s three affected
+tests), not a design concern, mirroring this ADR's original migration of `RouteModelUseCase`'s
+constructor. The `no_viable_model_group` response contract grew one additional key; existing
+consumers reading only `error.code`/`error.message` are unaffected.

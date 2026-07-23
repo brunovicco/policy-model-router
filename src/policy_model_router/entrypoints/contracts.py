@@ -26,6 +26,7 @@ from policy_model_router.domain.enums import (
     RiskLevel,
     Workload,
 )
+from policy_model_router.domain.routing import RejectedDecision as DomainRejectedDecision
 from policy_model_router.domain.routing import RouteDecision as DomainRouteDecision
 from policy_model_router.domain.routing import RouteRequest as DomainRouteRequest
 
@@ -100,6 +101,32 @@ class ModelRouteDecision(StrictContract):
     environment: _NonEmptyStr
 
 
+class RouteRejection(StrictContract):
+    """The outcome of a routing decision whose mapped model group failed a hard constraint.
+
+    Carries the same provenance as :class:`ModelRouteDecision` (same five identity fields plus
+    ``routing_decision_id``/``decided_at``), so a rejection is exactly as auditable as an
+    acceptance.
+    """
+
+    schema_version: Literal["1.0"]
+    routing_decision_id: _NonEmptyStr
+    decided_at: UtcDatetime
+    workflow_id: _NonEmptyStr
+    task_id: _NonEmptyStr
+    workload: Workload
+    rejected_model_group: ModelGroup
+    reason: _NonEmptyStr
+    reason_code: ReasonCode
+    observed_value: _NonEmptyStr
+    required_value: _NonEmptyStr
+    policy_id: _NonEmptyStr
+    policy_version: _NonEmptyStr
+    policy_digest: _NonEmptyStr
+    service_version: _NonEmptyStr
+    environment: _NonEmptyStr
+
+
 def to_domain_request(request: ModelRouteRequest) -> DomainRouteRequest:
     """Map the validated wire request into the framework-free domain request."""
     return DomainRouteRequest(
@@ -147,12 +174,36 @@ def from_domain_decision(decision: DomainRouteDecision) -> ModelRouteDecision:
     )
 
 
+def from_domain_rejection(decision: DomainRejectedDecision) -> RouteRejection:
+    """Map a domain rejected decision into the wire response contract."""
+    return RouteRejection(
+        schema_version=decision.schema_version,
+        routing_decision_id=decision.routing_decision_id,
+        decided_at=decision.decided_at,
+        workflow_id=decision.workflow_id,
+        task_id=decision.task_id,
+        workload=decision.workload,
+        rejected_model_group=decision.rejected_model_group,
+        reason=decision.reason,
+        reason_code=decision.reason_code,
+        observed_value=decision.observed_value,
+        required_value=decision.required_value,
+        policy_id=decision.policy_id,
+        policy_version=decision.policy_version,
+        policy_digest=decision.policy_digest,
+        service_version=decision.service_version,
+        environment=decision.environment,
+    )
+
+
 __all__ = [
     "ModelRouteDecision",
     "ModelRouteRequest",
     "RejectedCandidate",
+    "RouteRejection",
     "StrictContract",
     "UtcDatetime",
     "from_domain_decision",
+    "from_domain_rejection",
     "to_domain_request",
 ]

@@ -229,11 +229,33 @@ política incluída. O roteador não promove silenciosamente a requisição para
   "error": {
     "code": "no_viable_model_group",
     "message": "no viable model group for workload 'document_extraction': mapped group 'fast-small' rejected (not authorized for data classification 'confidential')"
+  },
+  "decision": {
+    "schema_version": "1.0",
+    "routing_decision_id": "8f2c1e3a-...",
+    "decided_at": "2026-07-23T12:00:01Z",
+    "workflow_id": "credit-review-42",
+    "task_id": "extract-docs-1",
+    "workload": "document_extraction",
+    "rejected_model_group": "fast-small",
+    "reason": "not authorized for data classification 'confidential'",
+    "reason_code": "data_classification_not_authorized",
+    "observed_value": "confidential",
+    "required_value": "public, internal",
+    "policy_id": "credit-desk-routing",
+    "policy_version": "1.0.0",
+    "policy_digest": "sha256:2f1a...c9",
+    "service_version": "0.2.0",
+    "environment": "production"
   }
 }
 ```
 
-O status da resposta é `422 Unprocessable Entity`.
+O status da resposta é `422 Unprocessable Entity`. `error.code`/`error.message` são o envelope de
+erro original e estável; `decision` é aditivo - uma rejeição carrega exatamente a mesma proveniência
+(`routing_decision_id`, `decided_at` e os cinco campos de identidade da política/deployment) que uma
+decisão aceita, portanto é igualmente auditável (veja a
+[ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md)).
 
 ## Contrato da API
 
@@ -367,7 +389,16 @@ padrão de processo/Python que o registry do `prometheus_client` sempre expõe),
 
 Monitore `increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (somado
 entre réplicas) para detectar uma indisponibilidade prolongada do Redis em vez de depender só da
-linha de log `rate_limiter_backend_unavailable`. Nenhum dos três endpoints desta seção exige
+linha de log `rate_limiter_backend_unavailable`.
+
+Toda chamada a `POST /route` também emite uma linha de log estruturada `routing_decision`
+(`outcome=accepted` ou `outcome=rejected`) contendo `routing_decision_id`, `workflow_id`, `task_id`,
+`workload`, o grupo de modelo relevante, `reason_code` (apenas em rejeições), os campos de
+identidade da política e `duration_ms` - sem conteúdo de prompt ou payload, conforme
+`docs/PRIVACY.md`. Isso é uma linha de log, não um armazenamento de auditoria durável; veja a
+[emenda da ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md).
+
+Nenhum dos três endpoints desta seção exige
 `X-API-Key` nem conta para o rate limit, então orquestradores e scrapers podem monitorá-los sem
 custo. `/readyz` é uma checagem rasa: não verifica o Redis mesmo quando `REDIS_URL` está
 configurada, então "pronto" significa "inicialização concluída, incluindo uma checagem de
