@@ -77,6 +77,12 @@ class _FailingClient:
         raise ConnectionError("redis unreachable")
 
 
+@pytest.mark.parametrize("window_seconds", [0, -1, float("inf"), 86_400.0001, 1e308])
+def test_rejects_an_unsafe_window_before_redis_arithmetic(window_seconds: float) -> None:
+    with pytest.raises(ValueError, match="window_seconds"):
+        RedisRateLimiter(_FakeRedisClient(), max_requests=1, window_seconds=window_seconds)
+
+
 @pytest.mark.anyio
 async def test_allows_requests_up_to_the_limit_within_one_window() -> None:
     client = _FakeRedisClient()

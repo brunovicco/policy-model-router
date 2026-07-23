@@ -199,7 +199,7 @@ Exemplo de resposta:
   "policy_id": "credit-desk-routing",
   "policy_version": "1.0.0",
   "policy_digest": "sha256:2f1a...c9",
-  "service_version": "0.2.0",
+  "service_version": "0.3.0",
   "environment": "production"
 }
 ```
@@ -245,7 +245,7 @@ política incluída. O roteador não promove silenciosamente a requisição para
     "policy_id": "credit-desk-routing",
     "policy_version": "1.0.0",
     "policy_digest": "sha256:2f1a...c9",
-    "service_version": "0.2.0",
+    "service_version": "0.3.0",
     "environment": "production"
   }
 }
@@ -319,7 +319,7 @@ Outras configurações de runtime:
 | `LOG_FORMAT` | `json` | Use `console` para logs locais legíveis por humanos |
 | `API_KEYS` | *(obrigatória)* | Objeto JSON mapeando cada `agent_name` à sua própria chave, comparada ao header `X-API-Key` em `POST /route`; o serviço recusa iniciar se estiver ausente, vazia ou malformada |
 | `RATE_LIMIT_MAX_REQUESTS` | `60` | Requisições permitidas por par `(IP do cliente, agent_name)` por janela |
-| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Duração da janela de rate limit, em segundos, compartilhada pelos dois níveis abaixo |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Duração da janela de rate limit, em segundos, compartilhada pelos dois níveis abaixo; deve ser maior que `0` e no máximo `86400` |
 | `RATE_LIMIT_PER_IP_MAX_REQUESTS` | `600` | Requisições permitidas por IP do cliente isoladamente por janela, verificado antes do nível por agente e antes da autenticação |
 | `RATE_LIMIT_MAX_TRACKED_KEYS` | `100000` | Só para o limitador em memória (ignorado quando `REDIS_URL` está definida): limita quantas chaves distintas ficam em memória por nível, descartando a menos usada recentemente ao ultrapassar o limite |
 | `REDIS_URL` | *(ausente)* | Opcional. Compartilha o rate limit entre réplicas via Redis (ADR-0008); requer `uv sync --extra rate-limit`. Se ausente, mantém o limitador padrão em memória, por processo |
@@ -397,9 +397,10 @@ entre réplicas) para detectar uma indisponibilidade prolongada do Redis em vez 
 linha de log `rate_limiter_backend_unavailable`.
 
 Toda chamada a `POST /route` também emite uma linha de log estruturada `routing_decision`
-(`outcome=accepted` ou `outcome=rejected`) contendo `routing_decision_id`, `workflow_id`, `task_id`,
+(`outcome=accepted` ou `outcome=rejected`) contendo `routing_decision_id`, `correlation_id`,
 `workload`, o grupo de modelo relevante, `reason_code` (apenas em rejeições), os campos de
-identidade da política e `duration_ms` - sem conteúdo de prompt ou payload, conforme
+identidade da política e `duration_ms`. Os campos `workflow_id` e `task_id`, fornecidos pelo
+cliente, permanecem no contrato de requisição/resposta, mas não são registrados em logs, conforme
 `docs/PRIVACY.md`. Isso é uma linha de log, não um armazenamento de auditoria durável; veja a
 [emenda da ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md).
 

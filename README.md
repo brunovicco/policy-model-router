@@ -194,7 +194,7 @@ Example response:
   "policy_id": "credit-desk-routing",
   "policy_version": "1.0.0",
   "policy_digest": "sha256:2f1a...c9",
-  "service_version": "0.2.0",
+  "service_version": "0.3.0",
   "environment": "production"
 }
 ```
@@ -239,7 +239,7 @@ shipped policy. The router does not silently promote the request to a stronger g
     "policy_id": "credit-desk-routing",
     "policy_version": "1.0.0",
     "policy_digest": "sha256:2f1a...c9",
-    "service_version": "0.2.0",
+    "service_version": "0.3.0",
     "environment": "production"
   }
 }
@@ -311,7 +311,7 @@ Other runtime settings:
 | `LOG_FORMAT` | `json` | Use `console` for human-readable local logs |
 | `API_KEYS` | *(required)* | JSON object mapping each `agent_name` to its own API key, checked against the `X-API-Key` header on `POST /route`; the service refuses to start if unset, empty, or malformed |
 | `RATE_LIMIT_MAX_REQUESTS` | `60` | Requests allowed per `(client IP, agent_name)` pair per window |
-| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window length, in seconds, shared by both tiers below |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window length, in seconds, shared by both tiers below; must be greater than `0` and at most `86400` |
 | `RATE_LIMIT_PER_IP_MAX_REQUESTS` | `600` | Requests allowed per client IP alone per window, checked before the per-agent tier and before authentication |
 | `RATE_LIMIT_MAX_TRACKED_KEYS` | `100000` | In-memory limiter only (ignored once `REDIS_URL` is set): caps distinct keys held in memory per tier, evicting the least-recently-touched one past this limit |
 | `REDIS_URL` | *(unset)* | Optional. Shares the rate limit across replicas via Redis (ADR-0008); requires `uv sync --extra rate-limit`. Unset keeps the default in-memory, per-process limiter |
@@ -386,10 +386,10 @@ across replicas) to catch a sustained Redis outage instead of relying on the
 `rate_limiter_backend_unavailable` log line alone.
 
 Every `POST /route` call also emits a structured `routing_decision` log line (`outcome=accepted` or
-`outcome=rejected`) carrying `routing_decision_id`, `workflow_id`, `task_id`, `workload`, the
-relevant model group, `reason_code` (rejections only), the policy identity fields, and
-`duration_ms` - no prompt or payload content, per `docs/PRIVACY.md`. This is a log line, not a
-durable audit store; see [ADR-0009's amendment](docs/adr/0009-policy-identity-and-decision-provenance.md).
+`outcome=rejected`) carrying `routing_decision_id`, `correlation_id`, `workload`, the relevant
+model group, `reason_code` (rejections only), the policy identity fields, and `duration_ms`.
+Caller-supplied `workflow_id` and `task_id` remain in the request/response contract but are not
+logged, per `docs/PRIVACY.md`. This is a log line, not a durable audit store; see [ADR-0009's amendment](docs/adr/0009-policy-identity-and-decision-provenance.md).
 
 None of the three endpoints in this section requires `X-API-Key` or counts against the rate limit,
 so orchestrators and scrapers can probe them cheaply. `/readyz` is a shallow check: it does not

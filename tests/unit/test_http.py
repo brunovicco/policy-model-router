@@ -257,8 +257,15 @@ def test_route_emits_a_routing_decision_log_event_on_success(
     monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
     monkeypatch.delenv("REDIS_URL", raising=False)
 
-    with TestClient(app) as test_client, capture_logs() as logs:
-        response = test_client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
+    with (
+        TestClient(app) as test_client,
+        capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs,
+    ):
+        response = test_client.post(
+            "/route",
+            json=_valid_payload(),
+            headers={**_AUTH_HEADERS, "X-Correlation-Id": "decision-log-success"},
+        )
 
     assert response.status_code == 200
     decision_logs = [log for log in logs if log["event"] == "routing_decision"]
@@ -266,10 +273,11 @@ def test_route_emits_a_routing_decision_log_event_on_success(
     log = decision_logs[0]
     assert log["outcome"] == "accepted"
     assert log["model_group"] == "reasoning-medium"
-    assert log["workflow_id"] == "workflow-1"
-    assert log["task_id"] == "task-1"
     assert log["routing_decision_id"]
+    assert log["correlation_id"] == "decision-log-success"
     assert log["policy_id"]
+    assert "workflow_id" not in log
+    assert "task_id" not in log
 
 
 def test_route_emits_a_routing_decision_log_event_on_rejection(
@@ -279,11 +287,14 @@ def test_route_emits_a_routing_decision_log_event_on_rejection(
     monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
     monkeypatch.delenv("REDIS_URL", raising=False)
 
-    with TestClient(app) as test_client, capture_logs() as logs:
+    with (
+        TestClient(app) as test_client,
+        capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs,
+    ):
         response = test_client.post(
             "/route",
             json=_valid_payload(workload="document_extraction", data_classification="confidential"),
-            headers=_AUTH_HEADERS,
+            headers={**_AUTH_HEADERS, "X-Correlation-Id": "decision-log-rejection"},
         )
 
     assert response.status_code == 422
@@ -294,7 +305,10 @@ def test_route_emits_a_routing_decision_log_event_on_rejection(
     assert log["model_group"] == "fast-small"
     assert log["reason_code"] == "data_classification_not_authorized"
     assert log["routing_decision_id"]
+    assert log["correlation_id"] == "decision-log-rejection"
     assert log["policy_id"]
+    assert "workflow_id" not in log
+    assert "task_id" not in log
 
 
 def test_route_response_never_reveals_other_agents_allowlist(

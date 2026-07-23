@@ -157,3 +157,12 @@ def test_settings_fails_closed_on_an_infinite_rate_limit_window(
 
     with pytest.raises(pydantic.ValidationError, match="rate_limit_window_seconds"):
         Settings()
+
+
+def test_settings_fails_closed_on_a_rate_limit_window_above_one_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RATE_LIMIT_WINDOW_SECONDS", "1e308")
+
+    with pytest.raises(pydantic.ValidationError, match="rate_limit_window_seconds"):
+        Settings()

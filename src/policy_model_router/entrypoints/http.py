@@ -479,8 +479,9 @@ async def health() -> dict[str, str]:
 async def readyz(request: Request) -> dict[str, str]:
     """Readiness probe: 200 once the routing policy loaded successfully at startup.
 
-    This is a shallow check: the service has no external dependency to probe (per ADR-0004), so
-    readiness here means "startup completed", not "a downstream system is healthy".
+    This is a shallow check: when Redis is configured, startup probes it once, but this endpoint
+    does not re-probe Redis or any future availability provider. Readiness here means "startup
+    completed", not "every runtime dependency is currently healthy".
     """
     _ = request.app.state.route_model_use_case
     return {"status": "ready"}
@@ -531,8 +532,6 @@ async def route(
             "routing_decision",
             outcome="rejected",
             routing_decision_id=exc.decision.routing_decision_id,
-            workflow_id=exc.decision.workflow_id,
-            task_id=exc.decision.task_id,
             workload=workload,
             model_group=exc.decision.rejected_model_group.value,
             reason_code=exc.decision.reason_code.value,
@@ -555,8 +554,6 @@ async def route(
         "routing_decision",
         outcome="accepted",
         routing_decision_id=decision.routing_decision_id,
-        workflow_id=decision.workflow_id,
-        task_id=decision.task_id,
         workload=workload,
         model_group=decision.selected_model_group.value,
         policy_id=decision.policy_id,

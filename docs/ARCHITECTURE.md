@@ -108,11 +108,15 @@ Enforced by `scripts/validate_architecture.py` as part of the quality gate.
 
 - **Configuration**: `ROUTING_POLICY_PATH`, `APP_ENV`, `LOG_LEVEL`, `LOG_FORMAT`, `API_KEYS`,
   `RATE_LIMIT_MAX_REQUESTS`, `RATE_LIMIT_PER_IP_MAX_REQUESTS`, `RATE_LIMIT_WINDOW_SECONDS`,
-  `RATE_LIMIT_FINGERPRINT_SECRET` as environment variables; no other runtime configuration.
+  `RATE_LIMIT_FINGERPRINT_SECRET` as environment variables; the shared rate-limit window is
+  constrained to `(0, 86,400]` seconds to keep both implementations within their operational
+  range.
 - **Logging**: structured JSON to stdout via `configure_logging()`, with a correlation ID
   (`X-Correlation-Id`, reused from the caller or generated) bound for the duration of each
-  request; no prompt, response, or personal-data content is logged. This service performs no LLM
-  call tracing - it never calls an LLM (ADR-0004) - so there is no tracing adapter to configure.
+  request; `routing_decision_id` and `correlation_id` support correlation without logging the
+  caller-supplied `workflow_id`/`task_id`. No prompt, response, or personal-data content is logged.
+  This service performs no LLM call tracing - it never calls an LLM (ADR-0004) - so there is no
+  tracing adapter to configure.
 - **Authentication**: per-agent API keys (`X-API-Key` header, looked up by the request's
   `agent_name`), required to start the service and checked with a constant-time comparison; not
   full IAM - no expiry, scoping, or identity assurance beyond "knew the right key" (ADR-0007,

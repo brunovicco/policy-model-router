@@ -12,6 +12,7 @@ rather than only discoverable in logs (ADR-0008's amendment).
 
 import hashlib
 import hmac
+import math
 import secrets
 from typing import Any
 
@@ -21,6 +22,7 @@ from prometheus_client import Counter
 logger = structlog.get_logger(__name__)
 
 _KEY_PREFIX = "policy-model-router:rate-limit"
+_MAX_WINDOW_SECONDS = 86_400.0
 
 # INCR and setting the TTL happen in one round trip so a crash between the two never leaves a
 # counter key without an expiry (which would otherwise block that key forever once it reached the
@@ -61,7 +63,8 @@ class RedisRateLimiter:
             client: An async client exposing ``eval`` and ``ping`` coroutines,
                 e.g. ``redis.asyncio.Redis``.
             max_requests: Maximum requests a single key may make within one window.
-            window_seconds: Window length, in seconds.
+            window_seconds: Window length, in seconds, in the operational range
+                ``(0, 86_400]``.
             fingerprint_secret: HMAC key for the fail-open log fingerprint (see
                 :meth:`_fingerprint`). Defaults to a random, process-local secret generated once
                 per instance - not stable across restarts, but a caller with only log access can
@@ -69,9 +72,12 @@ class RedisRateLimiter:
                 ``RATE_LIMIT_FINGERPRINT_SECRET``) to keep fingerprints stable across restarts for
                 longer-lived log correlation.
         """
+        if not math.isfinite(window_seconds) or not 0 < window_seconds <= _MAX_WINDOW_SECONDS:
+            raise ValueError("window_seconds must be finite and in the range (0, 86400]")
+
         self._client = client
         self._max_requests = max_requests
-        self._window_seconds = window_seconds
+        self._window_ms = max(1, round(window_seconds * 1000))
         self._fingerprint_secret = (
             fingerprint_secret if fingerprint_secret is not None else secrets.token_bytes(32)
         )
@@ -97,9 +103,8 @@ class RedisRateLimiter:
         without becoming a request-path failure.
         """
         full_key = f"{_KEY_PREFIX}:{key}"
-        window_ms = max(1, round(self._window_seconds * 1000))
         try:
-            count = await self._client.eval(_INCR_AND_EXPIRE_SCRIPT, 1, full_key, window_ms)
+            count = await self._client.eval(_INCR_AND_EXPIRE_SCRIPT, 1, full_key, self._window_ms)
         except Exception:
             BACKEND_UNAVAILABLE_TOTAL.inc()
             logger.warning(

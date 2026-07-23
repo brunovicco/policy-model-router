@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     log_format: _LogFormat = Field(default="json")
     rate_limit_max_requests: int = Field(default=60, gt=0)
     rate_limit_per_ip_max_requests: int = Field(default=600, gt=0)
-    rate_limit_window_seconds: float = Field(default=60.0, gt=0)
+    rate_limit_window_seconds: float = Field(default=60.0, gt=0, le=86_400)
     rate_limit_max_tracked_keys: int = Field(default=100_000, gt=0)
     rate_limit_fingerprint_secret: str | None = Field(default=None)
     redis_url: str | None = Field(default=None)
@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     @field_validator("rate_limit_window_seconds")
     @classmethod
     def _must_be_finite(cls, value: float) -> float:
-        """Reject non-finite values: ``gt=0`` alone does not exclude ``inf``, which breaks Redis."""
+        """Reject non-finite values before they reach rate-limiter arithmetic."""
         if not math.isfinite(value):
             raise ValueError("rate_limit_window_seconds must be a finite number")
         return value
