@@ -491,6 +491,84 @@ def test_route_is_rate_limited_per_client_ip_even_when_agent_name_varies(
     assert second.status_code == 429
 
 
+def test_route_rejects_a_body_over_the_configured_size_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "10")
+
+    with TestClient(app) as size_limited_client:
+        response = size_limited_client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
+
+    assert response.status_code == 413
+    assert response.json() == {
+        "error": {
+            "code": "payload_too_large",
+            "message": "request body exceeds the 10-byte limit",
+        }
+    }
+
+
+def test_an_oversized_body_still_consumes_the_per_ip_rate_limit_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test: a flood of oversized bodies must not get a free pass on the IP tier just
+    because the body-size check runs after it - the IP check must still see (and count) the
+    request, closing the gap where a malformed/oversized body used to bypass both rate-limit tiers
+    entirely (ADR-0011).
+    """
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "10")
+    monkeypatch.setenv("RATE_LIMIT_PER_IP_MAX_REQUESTS", "1")
+
+    with TestClient(app) as limited_client:
+        first = limited_client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
+        second = limited_client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
+
+    assert first.status_code == 413
+    assert second.status_code == 429
+
+
+def test_route_rejects_an_identifier_over_the_max_length(client: TestClient) -> None:
+    response = client.post(
+        "/route",
+        json=_valid_payload(workflow_id="w" * 201),
+        headers=_AUTH_HEADERS,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_route_rejects_a_token_estimate_over_the_ceiling(client: TestClient) -> None:
+    response = client.post(
+        "/route",
+        json=_valid_payload(context_tokens_estimated=10_000_001),
+        headers=_AUTH_HEADERS,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_an_oversized_correlation_id_header_is_ignored(client: TestClient) -> None:
+    oversized_correlation_id = "c" * 201
+
+    response = client.post(
+        "/route",
+        json=_valid_payload(),
+        headers={**_AUTH_HEADERS, "X-Correlation-Id": oversized_correlation_id},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["X-Correlation-Id"] != oversized_correlation_id
+    assert len(response.headers["X-Correlation-Id"]) < 201
+
+
 def test_health_endpoint_requires_no_api_key(client: TestClient) -> None:
     response = client.get("/health")
 

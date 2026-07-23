@@ -260,12 +260,12 @@ timestamps must be timezone-aware UTC values, and numeric limits must be positiv
 |---|---|
 | `schema_version` | Exactly `1.0` |
 | `requested_at` | UTC timestamp |
-| `workflow_id`, `task_id`, `agent_name` | Non-empty strings |
+| `workflow_id`, `task_id`, `agent_name` | Non-empty strings, at most 200 characters |
 | `workload` | `document_extraction`, `cashflow_analysis`, `findings_correlation`, `opinion_drafting`, or `json_repair` |
 | `risk_level` | `low`, `medium`, `high`, or `critical` |
 | `data_classification` | `public`, `internal`, `confidential`, or `restricted` |
-| `context_tokens_estimated` | Integer greater than or equal to zero (input/prompt tokens) |
-| `max_output_tokens_estimated` | Integer greater than or equal to zero (expected output/completion tokens) |
+| `context_tokens_estimated` | Integer between zero and 10,000,000 (input/prompt tokens) |
+| `max_output_tokens_estimated` | Integer between zero and 10,000,000 (expected output/completion tokens) |
 | `structured_output_required` | Boolean |
 | `max_latency_ms` | Positive integer |
 | `max_cost_usd` | Positive decimal value |
@@ -281,6 +281,7 @@ Stable error codes are:
 | HTTP status | Code | Meaning |
 |---:|---|---|
 | 401 | `unauthorized` | Missing or invalid `X-API-Key` header |
+| 413 | `payload_too_large` | Request body exceeds `MAX_REQUEST_BODY_BYTES`, per its declared `Content-Length` |
 | 422 | `invalid_request` | The request does not match the contract |
 | 422 | `no_viable_model_group` | The workload's mapped group failed a hard constraint |
 | 429 | `rate_limit_exceeded` | Too many requests for this `(client IP, agent_name)` pair |
@@ -315,6 +316,7 @@ Other runtime settings:
 | `RATE_LIMIT_MAX_TRACKED_KEYS` | `100000` | In-memory limiter only (ignored once `REDIS_URL` is set): caps distinct keys held in memory per tier, evicting the least-recently-touched one past this limit |
 | `REDIS_URL` | *(unset)* | Optional. Shares the rate limit across replicas via Redis (ADR-0008); requires `uv sync --extra rate-limit`. Unset keeps the default in-memory, per-process limiter |
 | `RATE_LIMIT_FINGERPRINT_SECRET` | *(unset)* | Redis-backed limiter only. HMAC key for the fail-open log fingerprint; unset uses a random per-process secret instead (stable per process, not across restarts) |
+| `MAX_REQUEST_BODY_BYTES` | `16384` | Maximum `POST /route` body size, checked against `Content-Length` before the body is parsed (ADR-0011). A chunked body with no `Content-Length` is not checked - see [ADR-0011](docs/adr/0011-http-boundary-pre-parse-limits.md) |
 
 ## Authentication and rate limiting
 
@@ -331,8 +333,10 @@ It is also rate-limited on two tiers, both checked *before* authentication so re
 invalid-API-key attempts are throttled too: a light per-client-IP tier
 (`RATE_LIMIT_PER_IP_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS`), then a per-`(IP, agent_name)`
 tier (`RATE_LIMIT_MAX_REQUESTS`) - the first tier exists specifically so a caller cannot dodge the
-second merely by varying the `agent_name` it sends on every request. Exceeding either tier returns
-`429 rate_limit_exceeded`. By default both are in-memory, fixed-window counters, **per process**,
+second merely by varying the `agent_name` it sends on every request. The per-IP tier runs in ASGI
+middleware, before FastAPI even parses the request body (ADR-0011), so a malformed or oversized
+body still counts against it; the per-agent tier still runs inside the handler, after parsing,
+since it needs `agent_name` from the body. Exceeding either tier returns `429 rate_limit_exceeded`. By default both are in-memory, fixed-window counters, **per process**,
 each bounded to `RATE_LIMIT_MAX_TRACKED_KEYS` distinct keys - a multi-instance deployment enforces
 the limit per instance, not cluster-wide (ADR-0007). Set `REDIS_URL` (and install
 `uv sync --extra rate-limit`) to share both tiers across replicas instead; run
