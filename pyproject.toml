@@ -5,7 +5,7 @@ description = "Deterministic, policy-based model-group router for governed LLM w
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.13,<3.15"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "fastapi>=0.115",
     "prometheus-client>=0.25.0",

@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -47,3 +47,46 @@ jobs:
 
       - name: Project quality gate
         run: uv run python scripts/quality_gate.py
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build image
+        run: docker build -t policy-model-router:ci .
+
+      - name: Smoke test the image
+        # Deliberately Redis-free: the shipped image's Redis integration is already covered by
+        # the quality job's Python-level integration test. This only proves the built image
+        # itself (dependencies, CMD, the multi-stage copy) isn't broken before a real release
+        # ever pushes it.
+        run: |
+          docker run -d --name pmr-smoke -p 8000:8000 \
+            -e API_KEYS='{"smoke-agent":"smoke-key"}' \
+            policy-model-router:ci
+
+          for _ in $(seq 1 20); do
+            if curl -fs http://localhost:8000/health > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          if ! curl -fs http://localhost:8000/health; then
+            echo "container never became healthy"
+            docker logs pmr-smoke
+            exit 1
+          fi
+          curl -fs http://localhost:8000/readyz
+
+      - name: Show container logs
+        if: always()
+        run: docker logs pmr-smoke
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f pmr-smoke
