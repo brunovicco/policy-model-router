@@ -14,8 +14,8 @@ from dataclasses import replace
 
 from policy_model_router.application.ports import AvailabilityProvider, Clock, IdGenerator
 from policy_model_router.domain.catalog import RoutingPolicy
-from policy_model_router.domain.constraints import CONSTRAINTS
-from policy_model_router.domain.enums import ModelGroup
+from policy_model_router.domain.constraints import CONSTRAINTS, ConstraintFailure
+from policy_model_router.domain.enums import ModelGroup, ReasonCode
 from policy_model_router.domain.routing import (
     NoViableModelGroupError,
     RejectedCandidate,
@@ -70,31 +70,46 @@ class RouteModelUseCase:
                 f"routing policy has no mapping for workload {request.workload.value!r}"
             ) from exc
 
-        rejection_reasons: dict[ModelGroup, str] = {}
+        rejection_reasons: dict[ModelGroup, ConstraintFailure] = {}
         for model_group, profile in self._policy.model_groups.items():
             effective_profile = replace(
                 profile,
                 available=await self._availability.is_available(model_group, profile.available),
             )
             for constraint in CONSTRAINTS:
-                reason = constraint(request, effective_profile, workload_rule)
-                if reason is not None:
-                    rejection_reasons[model_group] = reason
+                failure = constraint(request, effective_profile, workload_rule)
+                if failure is not None:
+                    rejection_reasons[model_group] = failure
                     break
 
         selected = workload_rule.model_group
         if selected in rejection_reasons:
-            raise NoViableModelGroupError(request.workload, selected, rejection_reasons[selected])
+            failure = rejection_reasons[selected]
+            raise NoViableModelGroupError(request.workload, selected, failure.message, failure.code)
+
+        def _to_rejected_candidate(model_group: ModelGroup) -> RejectedCandidate:
+            failure = rejection_reasons.get(model_group)
+            if failure is not None:
+                return RejectedCandidate(
+                    model_group=model_group,
+                    reason=failure.message,
+                    reason_code=failure.code,
+                    observed_value=failure.observed_value,
+                    required_value=failure.required_value,
+                )
+            return RejectedCandidate(
+                model_group=model_group,
+                reason=(
+                    f"workload {request.workload.value!r} is mapped to "
+                    f"{selected.value!r}, not this group"
+                ),
+                reason_code=ReasonCode.WORKLOAD_MAPPED_ELSEWHERE,
+                observed_value=request.workload.value,
+                required_value=selected.value,
+            )
 
         rejected_candidates = tuple(
-            RejectedCandidate(
-                model_group=model_group,
-                reason=rejection_reasons.get(
-                    model_group,
-                    f"workload {request.workload.value!r} is mapped to "
-                    f"{selected.value!r}, not this group",
-                ),
-            )
+            _to_rejected_candidate(model_group)
             for model_group in sorted(self._policy.model_groups, key=lambda group: group.value)
             if model_group != selected
         )

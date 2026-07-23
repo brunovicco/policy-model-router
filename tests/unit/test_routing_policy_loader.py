@@ -112,6 +112,15 @@ def test_load_routing_policy_fails_closed_when_policy_id_is_missing(tmp_path: Pa
         load_routing_policy(policy_path)
 
 
+def test_load_routing_policy_fails_closed_on_an_unknown_schema_version(tmp_path: Path) -> None:
+    unknown_version = _VALID_YAML.replace('schema_version: "1.0"', 'schema_version: "999.0"')
+    policy_path = tmp_path / "routing_policy.yaml"
+    policy_path.write_text(unknown_version, encoding="utf-8")
+
+    with pytest.raises(RoutingPolicyLoadError):
+        load_routing_policy(policy_path)
+
+
 def test_load_routing_policy_parses_a_minimal_valid_file(tmp_path: Path) -> None:
     policy_path = tmp_path / "routing_policy.yaml"
     policy_path.write_text(_VALID_YAML, encoding="utf-8")

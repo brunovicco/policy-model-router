@@ -64,8 +64,6 @@ Path-scoped rules under `.claude/rules/` contain the detailed conventions for ea
 - Minimize personal data and document its purpose, retention, deletion, access, and processors.
 - Use structured logs with correlation context; do not log payloads, prompts, model responses,
   credentials, or personal data.
-- Langfuse tracing is metadata-only unless an explicit content-tracing opt-in satisfies
-  `docs/LLM_OBSERVABILITY.md`.
 - Review every new dependency for necessity, maintenance, vulnerabilities, and license.
 
 ## MCP

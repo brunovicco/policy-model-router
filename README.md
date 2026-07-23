@@ -112,7 +112,7 @@ available and have unrestricted agent allowlists in the shipped policy. Change t
 deliberately for each environment.
 
 Cost figures are this router's own illustrative price-per-token inputs to the deterministic cost
-constraint — like `typical_latency_ms`, a static number the policy author maintains, not a live
+constraint - like `typical_latency_ms`, a static number the policy author maintains, not a live
 feed synced from any provider (see [ADR-0010](docs/adr/0010-token-based-cost-estimation.md)).
 
 ## Quick start
@@ -171,15 +171,24 @@ Example response:
   "rejected_candidates": [
     {
       "model_group": "fast-small",
-      "reason": "not authorized for data classification 'restricted'"
+      "reason": "not authorized for data classification 'restricted'",
+      "reason_code": "data_classification_not_authorized",
+      "observed_value": "restricted",
+      "required_value": "public, internal"
     },
     {
       "model_group": "fast-structured-output",
-      "reason": "not authorized for data classification 'restricted'"
+      "reason": "not authorized for data classification 'restricted'",
+      "reason_code": "data_classification_not_authorized",
+      "observed_value": "restricted",
+      "required_value": "public, internal"
     },
     {
       "model_group": "reasoning-medium",
-      "reason": "estimated context 100000 tokens exceeds group limit of 64000 tokens"
+      "reason": "estimated context 100000 tokens exceeds group limit of 64000 tokens",
+      "reason_code": "context_window_exceeded",
+      "observed_value": "100000",
+      "required_value": "<= 64000"
     }
   ],
   "policy_id": "credit-desk-routing",
@@ -192,9 +201,15 @@ Example response:
 
 `policy_id`/`policy_version`/`policy_digest` identify exactly which routing policy produced this
 decision (`policy_digest` is a `sha256` hash of the loaded YAML file's raw bytes, computed at
-load time — not hand-maintained, so it changes whenever the file's content changes even if nobody
+load time - not hand-maintained, so it changes whenever the file's content changes even if nobody
 remembered to bump `policy_version`); `service_version`/`environment` identify the deployment that
 produced it. See [ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md).
+
+Each rejected candidate also carries a machine-readable `reason_code` (one per constraint in
+[Constraint order](#constraint-order), plus `workload_mapped_elsewhere` for a candidate that passed
+every constraint but simply isn't the workload's mapped group) alongside `observed_value`/
+`required_value`, so a caller doesn't have to parse `reason`'s free text to build an audit trail or
+a UI.
 
 ### Hard rejection
 
@@ -232,7 +247,7 @@ timestamps must be timezone-aware UTC values, and numeric limits must be positiv
 | `max_cost_usd` | Positive decimal value |
 
 `context_tokens_estimated` and `max_output_tokens_estimated` both feed the cost constraint: each
-model group is priced per token (input and output rates separately — see
+model group is priced per token (input and output rates separately - see
 [Model-group profiles](#model-group-profiles)), so the estimated cost of a call is a function of
 its actual size, not a flat number per group. See
 [ADR-0010](docs/adr/0010-token-based-cost-estimation.md).
@@ -281,35 +296,35 @@ Other runtime settings:
 
 `POST /route` requires a valid `X-API-Key` header, matched against the key configured for the
 request's own `agent_name` in `API_KEYS` (constant-time comparison); a missing key, a wrong key, or
-a key that belongs to a different agent all return `401 unauthorized` — the response never reveals
+a key that belongs to a different agent all return `401 unauthorized` - the response never reveals
 which agent names are configured. One agent's key can be rotated or revoked without affecting any
 other agent. This is still not full IAM: there is no key expiry, scoping beyond "may call `/route`
-as this agent," or identity assurance stronger than "knew the right key" — see
+as this agent," or identity assurance stronger than "knew the right key" - see
 [ADR-0007's amendment](docs/adr/0007-http-boundary-hardening.md) for what a stronger mechanism
 (mTLS, OAuth2 client credentials) would add.
 
 It is also rate-limited on two tiers, both checked *before* authentication so repeated
 invalid-API-key attempts are throttled too: a light per-client-IP tier
 (`RATE_LIMIT_PER_IP_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS`), then a per-`(IP, agent_name)`
-tier (`RATE_LIMIT_MAX_REQUESTS`) — the first tier exists specifically so a caller cannot dodge the
+tier (`RATE_LIMIT_MAX_REQUESTS`) - the first tier exists specifically so a caller cannot dodge the
 second merely by varying the `agent_name` it sends on every request. Exceeding either tier returns
 `429 rate_limit_exceeded`. By default both are in-memory, fixed-window counters, **per process**,
-each bounded to `RATE_LIMIT_MAX_TRACKED_KEYS` distinct keys — a multi-instance deployment enforces
+each bounded to `RATE_LIMIT_MAX_TRACKED_KEYS` distinct keys - a multi-instance deployment enforces
 the limit per instance, not cluster-wide (ADR-0007). Set `REDIS_URL` (and install
 `uv sync --extra rate-limit`) to share both tiers across replicas instead; run
 `docker compose up -d redis` for a local instance. The Redis-backed limiter fails open on a backend
 error (it allows the request rather than blocking routing traffic on an unrelated outage) but fails
 the service closed at startup if the configured Redis is unreachable (ADR-0008). Its fail-open log
-line never includes the raw key (which embeds the caller's IP) — only an HMAC-keyed fingerprint, so
+line never includes the raw key (which embeds the caller's IP) - only an HMAC-keyed fingerprint, so
 an operator can correlate repeated failures without an attacker with log access being able to
 enumerate and match the low-entropy `(IP, agent_name)` space against an unkeyed hash (see
 [ADR-0008's third amendment](docs/adr/0008-redis-shared-rate-limiter.md)).
 
-The rate-limit key's IP component is always the raw TCP peer address — this service never reads
+The rate-limit key's IP component is always the raw TCP peer address - this service never reads
 `X-Forwarded-For`/`Forwarded`. Behind a reverse proxy, every real client shares the proxy's IP,
 collapsing per-client granularity to one shared bucket; if you need real per-client granularity in
 that topology, configure the proxy to pass a trusted header and configure Uvicorn/Starlette to
-trust only that specific hop (e.g. `--forwarded-allow-ips` scoped to the proxy's address) — never
+trust only that specific hop (e.g. `--forwarded-allow-ips` scoped to the proxy's address) - never
 trust forwarded headers from an unrestricted set of peers, or any client could forge the header and
 multiply its quota. See [ADR-0008's second amendment](docs/adr/0008-redis-shared-rate-limiter.md)
 for the full rationale.
@@ -320,7 +335,7 @@ for the full rationale.
 application layer resolves it through an `AvailabilityProvider` port
 ([ADR-0006](docs/adr/0006-availability-provider-port.md)); the only implementation shipped today,
 `StaticAvailabilityProvider`, passes that flag through unchanged. There is no live provider/gateway
-health check yet — the port exists so one can be added later as a new adapter, without changing the
+health check yet - the port exists so one can be added later as a new adapter, without changing the
 routing use case or the domain constraints.
 
 ## Health, readiness, and metrics
@@ -336,7 +351,7 @@ routing use case or the domain constraints.
 | `policy_model_router_route_rejections_total` | Counter | `workload`, `outcome` | Requests that did not produce a decision (`no_viable_model_group`, `misconfigured_policy`) |
 | `policy_model_router_route_duration_seconds` | Histogram | `workload` | Time spent evaluating one routing decision |
 | `policy_model_router_rate_limit_decisions_total` | Counter | `tier` (`per_ip`, `per_agent`), `outcome` (`allowed`, `blocked`) | Rate limiter admit/block decisions |
-| `policy_model_router_rate_limiter_backend_unavailable_total` | Counter | — | Requests where the Redis-backed rate limiter failed open because Redis was unreachable |
+| `policy_model_router_rate_limiter_backend_unavailable_total` | Counter | - | Requests where the Redis-backed rate limiter failed open because Redis was unreachable |
 
 Alert on `increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (summed
 across replicas) to catch a sustained Redis outage instead of relying on the
@@ -346,18 +361,26 @@ cheaply. `/readyz` is a shallow check: it does not probe Redis even when `REDIS_
 so "ready" means "startup completed, including a successful Redis connectivity check at that
 moment," not "Redis is healthy right now."
 
-None of the three is restricted at the network layer by this repository — that's an ingress/mesh
+None of the three is restricted at the network layer by this repository - that's an ingress/mesh
 concern, the same way deploying `/route` behind an authenticated gateway is. In production,
 restrict `/metrics` (and, more loosely, `/health`/`/readyz`) to internal scrapers/orchestrators.
 
 ## Container
 
-Build and run the non-root, multi-stage image:
+Build and run the non-root, multi-stage image. `API_KEYS` is required - the service refuses to
+start without it, in the container the same as anywhere else:
 
 ```bash
 docker build -t policy-model-router .
-docker run --rm -p 8000:8000 policy-model-router
+docker run --rm -p 8000:8000 \
+  -e API_KEYS='{"credit-analysis-agent":"dev-local-key"}' \
+  policy-model-router
 ```
+
+Mount a custom `routing_policy.yaml` and point `ROUTING_POLICY_PATH` at it to override the shipped
+policy; set `REDIS_URL` (already includes the `rate-limit` extra, so no extra install step is
+needed) to share rate limiting across replicas - see
+[Policy configuration](#policy-configuration) and [Authentication and rate limiting](#authentication-and-rate-limiting).
 
 SemVer tags trigger the repository's publish workflow, which builds the image and pushes its
 versioned tags to GitHub Container Registry after the quality gate passes.
@@ -375,9 +398,8 @@ domain      -> no outer layer
 - `domain`: closed vocabularies, policy value objects, routing requests and decisions, and pure
   constraint predicates;
 - `application`: deterministic routing use case and clock/ID/availability ports;
-- `adapters`: YAML policy loader, system clock, UUID generator, static availability provider,
-  in-memory rate limiter (default) and optional Redis-backed rate limiter, and opt-in tracing
-  support;
+- `adapters`: YAML policy loader, system clock, UUID generator, static availability provider, and
+  an in-memory rate limiter (default) plus an optional Redis-backed rate limiter;
 - `entrypoints`: Pydantic wire contracts, FastAPI endpoints (`/route`, `/health`, `/readyz`), error
   mapping, and structured logging.
 

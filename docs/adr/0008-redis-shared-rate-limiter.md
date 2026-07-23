@@ -16,8 +16,8 @@ team decided a new infrastructure dependency was worth it now.
 **Optional, not required.** `REDIS_URL` is unset by default, and the service keeps working exactly
 as before: `InMemoryRateLimiter`, per-process, no new dependency, no new deployment requirement.
 Setting `REDIS_URL` switches `/route` to a cluster-wide limit; this requires the optional
-`rate-limit` extra (`uv sync --extra rate-limit`, adding `redis>=5.0`) as a runtime dependency
-mirroring the existing `tracing` extra's opt-in pattern (ADR: see `docs/LLM_OBSERVABILITY.md`).
+`rate-limit` extra (`uv sync --extra rate-limit`, adding `redis>=5.0`) as an opt-in runtime
+dependency, installed only by deployments that actually set `REDIS_URL`.
 
 **No network dependency unless explicitly requested.** `adapters/redis_rate_limiter.py` never
 imports `redis` at module scope; `entrypoints/http.py::_build_rate_limiter` does the deferred
@@ -42,9 +42,8 @@ misconfigured network immediately. `RedisRateLimiter.allow`, by contrast, fails 
 `True`, logs a warning) on *any* exception from the client at request time. This is deliberate: a
 rate limiter is a defensive control on the request path, not this service's core value (routing
 decisions never touch Redis); a transient Redis blip in production should not turn into a routing
-outage. This mirrors the same principle already applied to the Langfuse tracing adapter
-(`adapters/tracing.py`: "Telemetry must not turn a completed model call into a business failure"),
-generalized here to "an anti-abuse control's outage must not turn a correct routing decision into
+outage. This generalizes the same principle applied elsewhere in this codebase to defensive,
+non-core controls: "an anti-abuse control's outage must not turn a correct routing decision into
 a failure."
 
 **A uniform `RateLimiter.ping()` in the port.** `InMemoryRateLimiter.ping()` is a no-op (nothing to
@@ -94,7 +93,7 @@ now be caught automatically, not just by the manual smoke test this ADR original
 incremented every time `RedisRateLimiter.allow` fails open. `entrypoints/http.py` adds
 `GET /metrics`, unauthenticated and unthrottled like `/health`/`/readyz`, returning
 `prometheus_client.generate_latest()`. `prometheus-client` is a required base dependency, not an
-extra: unlike Redis or Langfuse, it needs no external system of its own to import or to serve
+extra: unlike Redis, it needs no external system of its own to import or to serve
 `/metrics` - whether anything actually scrapes that endpoint is an operational choice, not a code
 dependency. A deployment can now alert on `increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0`
 in whatever Prometheus-compatible system scrapes it.

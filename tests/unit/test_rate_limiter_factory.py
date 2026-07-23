@@ -1,8 +1,7 @@
 """Unit tests for ``entrypoints/http.py``'s rate limiter factory (``_build_rate_limiter``).
 
 Injects a fake ``redis``/``redis.asyncio`` module tree via ``sys.modules`` rather than requiring
-the real optional ``redis`` package, mirroring ``tests/unit/test_tracing.py``'s pattern for the
-Langfuse optional dependency.
+the real optional ``redis`` package.
 """
 
 import sys
@@ -39,35 +38,50 @@ def _install_fake_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "redis.asyncio", fake_asyncio_module)
 
 
-def test_build_rate_limiter_defaults_to_in_memory_when_redis_url_is_unset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("REDIS_URL", raising=False)
-
-    limiter = _build_rate_limiter(max_requests=10, window_seconds=60)
+def test_build_rate_limiter_defaults_to_in_memory_when_redis_url_is_unset() -> None:
+    limiter = _build_rate_limiter(
+        max_requests=10, window_seconds=60, max_tracked_keys=100_000, redis_url=None
+    )
 
     assert isinstance(limiter, InMemoryRateLimiter)
+
+
+def test_build_rate_limiter_threads_max_tracked_keys_into_the_in_memory_limiter() -> None:
+    limiter = _build_rate_limiter(
+        max_requests=10, window_seconds=60, max_tracked_keys=5, redis_url=None
+    )
+
+    assert isinstance(limiter, InMemoryRateLimiter)
+    assert limiter._max_tracked_keys == 5
 
 
 def test_build_rate_limiter_fails_closed_when_redis_package_is_not_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A configured REDIS_URL with no installed client must not silently fall back."""
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    """A configured redis_url with no installed client must not silently fall back."""
     monkeypatch.setitem(sys.modules, "redis", None)
     monkeypatch.setitem(sys.modules, "redis.asyncio", None)
 
     with pytest.raises(RuntimeError, match="rate-limit"):
-        _build_rate_limiter(max_requests=10, window_seconds=60)
+        _build_rate_limiter(
+            max_requests=10,
+            window_seconds=60,
+            max_tracked_keys=100_000,
+            redis_url="redis://localhost:6379/0",
+        )
 
 
 def test_build_rate_limiter_returns_redis_backed_limiter_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_redis(monkeypatch)
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
 
-    limiter = _build_rate_limiter(max_requests=10, window_seconds=60)
+    limiter = _build_rate_limiter(
+        max_requests=10,
+        window_seconds=60,
+        max_tracked_keys=100_000,
+        redis_url="redis://localhost:6379/0",
+    )
 
     assert isinstance(limiter, RedisRateLimiter)
 
@@ -76,10 +90,13 @@ def test_build_rate_limiter_threads_the_fingerprint_secret_into_the_redis_limite
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_redis(monkeypatch)
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
 
     limiter = _build_rate_limiter(
-        max_requests=10, window_seconds=60, fingerprint_secret=b"configured-secret"
+        max_requests=10,
+        window_seconds=60,
+        max_tracked_keys=100_000,
+        redis_url="redis://localhost:6379/0",
+        fingerprint_secret=b"configured-secret",
     )
 
     assert isinstance(limiter, RedisRateLimiter)

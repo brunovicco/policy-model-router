@@ -7,17 +7,20 @@ through Agent Cards or the A2A protocol. Per ADR-0007 (amended) and ADR-0008's s
 tier, then a per-(IP, agent) tier - before authentication, so repeated invalid-API-key attempts
 are throttled too, and an attacker cannot bypass the per-agent tier merely by varying the claimed
 ``agent_name``. ``/health``, ``/readyz``, and ``/metrics`` are unauthenticated and unthrottled so
-orchestrators and scrapers can probe them cheaply.
+orchestrators and scrapers can probe them cheaply. Every request is bound to a correlation ID
+(``X-Correlation-Id``, reused from the caller or generated) for the duration of its handling, so
+every log line emitted while processing it - including from adapters like the Redis rate limiter -
+carries the same ID; see ``entrypoints/logging.py``.
 """
 
 import json
 import os
 import secrets
 import time
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
 from typing import Annotated, Protocol
 
 from fastapi import Depends, FastAPI, Header, Request, Response
@@ -42,14 +45,14 @@ from policy_model_router.entrypoints.contracts import (
     from_domain_decision,
     to_domain_request,
 )
-from policy_model_router.entrypoints.logging import configure_logging
+from policy_model_router.entrypoints.logging import (
+    bind_correlation_id,
+    clear_request_context,
+    configure_logging,
+)
+from policy_model_router.entrypoints.settings import Settings
 
 _SERVICE_NAME = "policy-model-router"
-_DEFAULT_ROUTING_POLICY_PATH = "config/routing_policy.yaml"
-_DEFAULT_RATE_LIMIT_MAX_REQUESTS = 60
-_DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60.0
-_DEFAULT_RATE_LIMIT_MAX_TRACKED_KEYS = 100_000
-_DEFAULT_RATE_LIMIT_PER_IP_MAX_REQUESTS = 600
 
 ROUTE_DECISIONS_TOTAL = Counter(
     "policy_model_router_route_decisions_total",
@@ -95,14 +98,17 @@ class RateLimiter(Protocol):
         """
         ...
 
+    async def close(self) -> None:
+        """Release any backend connection held by this limiter.
+
+        Called once during graceful shutdown, after the lifespan's ``yield``, so a Redis-backed
+        limiter's connection is not simply dropped when the process exits.
+        """
+        ...
+
 
 class AuthenticationError(Exception):
     """Raised when a request to a protected route has a missing or invalid API key."""
-
-
-def _routing_policy_path() -> Path:
-    """Return the configured routing policy file path, defaulting to the shipped config."""
-    return Path(os.environ.get("ROUTING_POLICY_PATH", _DEFAULT_ROUTING_POLICY_PATH))
 
 
 def _service_version() -> str:
@@ -141,33 +147,32 @@ def _required_api_keys() -> dict[str, str]:
     return parsed
 
 
-def _fingerprint_secret() -> bytes | None:
-    """Return the configured rate-limiter fingerprint HMAC secret, or ``None`` for an ephemeral one.
+def _api_docs_enabled() -> bool:
+    """Return whether OpenAPI docs (``/docs``, ``/redoc``, ``/openapi.json``) should be served.
 
-    Unset by default: ``RedisRateLimiter`` then falls back to a random, process-local secret,
-    which still defeats offline enumeration of the low-entropy ``(IP, agent_name)`` key space from
-    log access alone, but does not stay stable across restarts. Set the env var to keep
-    fingerprints stable across restarts for longer-lived log correlation; treat it as a secret.
+    Disabled by default (deny by default, per ``.claude/rules/security-privacy.md``): a minor
+    recon surface (route shapes, field names) that orchestrators/scrapers never need, unlike
+    ``/health``/``/readyz``/``/metrics``. Set ``ENABLE_API_DOCS=true`` for local development.
     """
-    raw = os.environ.get("RATE_LIMIT_FINGERPRINT_SECRET")
-    return raw.encode() if raw else None
+    return Settings().enable_api_docs
 
 
 def _build_rate_limiter(
-    *, max_requests: int, window_seconds: float, fingerprint_secret: bytes | None = None
+    *,
+    max_requests: int,
+    window_seconds: float,
+    max_tracked_keys: int,
+    redis_url: str | None,
+    fingerprint_secret: bytes | None = None,
 ) -> RateLimiter:
     """Build the configured rate limiter.
 
-    Redis-backed and shared across replicas if ``REDIS_URL`` is set (ADR-0008); otherwise the
-    default in-memory, per-process limiter. Raises ``RuntimeError`` (fail closed) if ``REDIS_URL``
+    Redis-backed and shared across replicas if ``redis_url`` is set (ADR-0008); otherwise the
+    default in-memory, per-process limiter. Raises ``RuntimeError`` (fail closed) if ``redis_url``
     is set but the optional ``redis`` package is not installed - a silent fallback to per-process
     behavior would defeat the reason the operator configured it.
     """
-    redis_url = os.environ.get("REDIS_URL", "")
     if not redis_url:
-        max_tracked_keys = int(
-            os.environ.get("RATE_LIMIT_MAX_TRACKED_KEYS", _DEFAULT_RATE_LIMIT_MAX_TRACKED_KEYS)
-        )
         return InMemoryRateLimiter(
             max_requests=max_requests,
             window_seconds=window_seconds,
@@ -196,41 +201,48 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Configure logging and load the routing policy, API keys, and rate limiters at startup.
 
     Fails fast if the routing policy is missing/invalid, the API keys are not configured, or
-    either rate limiter's backend (when Redis-backed) is not reachable.
+    either rate limiter's backend (when Redis-backed) is not reachable. Closes both limiters'
+    backend connections after the ``yield``, so a Redis-backed connection is released on graceful
+    shutdown rather than simply dropped.
     """
-    environment = os.environ.get("APP_ENV", "development")
+    settings = Settings()
     service_version = _service_version()
-    configure_logging(service=_SERVICE_NAME, environment=environment, version=service_version)
+    configure_logging(
+        service=_SERVICE_NAME,
+        environment=settings.app_env,
+        version=service_version,
+        level=settings.log_level,
+        json_format=settings.log_format.strip().lower() != "console",
+    )
 
-    policy = load_routing_policy(_routing_policy_path())
+    policy = load_routing_policy(settings.routing_policy_path)
     app.state.route_model_use_case = RouteModelUseCase(
         policy,
         clock=SystemClock(),
         id_generator=Uuid4IdGenerator(),
         availability=StaticAvailabilityProvider(),
         service_version=service_version,
-        environment=environment,
+        environment=settings.app_env,
     )
     app.state.api_keys = _required_api_keys()
 
-    fingerprint_secret = _fingerprint_secret()
-    window_seconds = float(
-        os.environ.get("RATE_LIMIT_WINDOW_SECONDS", _DEFAULT_RATE_LIMIT_WINDOW_SECONDS)
+    fingerprint_secret = (
+        settings.rate_limit_fingerprint_secret.encode()
+        if settings.rate_limit_fingerprint_secret
+        else None
     )
     rate_limiter = _build_rate_limiter(
-        max_requests=int(
-            os.environ.get("RATE_LIMIT_MAX_REQUESTS", _DEFAULT_RATE_LIMIT_MAX_REQUESTS)
-        ),
-        window_seconds=window_seconds,
+        max_requests=settings.rate_limit_max_requests,
+        window_seconds=settings.rate_limit_window_seconds,
+        max_tracked_keys=settings.rate_limit_max_tracked_keys,
+        redis_url=settings.redis_url,
         fingerprint_secret=fingerprint_secret,
     )
     ip_rate_limiter = _build_rate_limiter(
-        max_requests=int(
-            os.environ.get(
-                "RATE_LIMIT_PER_IP_MAX_REQUESTS", _DEFAULT_RATE_LIMIT_PER_IP_MAX_REQUESTS
-            )
-        ),
-        window_seconds=window_seconds,
+        max_requests=settings.rate_limit_per_ip_max_requests,
+        window_seconds=settings.rate_limit_window_seconds,
+        max_tracked_keys=settings.rate_limit_max_tracked_keys,
+        redis_url=settings.redis_url,
         fingerprint_secret=fingerprint_secret,
     )
     try:
@@ -243,8 +255,39 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
+    await rate_limiter.close()
+    await ip_rate_limiter.close()
 
-app = FastAPI(title="policy-model-router", lifespan=_lifespan)
+
+_docs_enabled = _api_docs_enabled()
+app = FastAPI(
+    title="policy-model-router",
+    lifespan=_lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
+)
+
+
+@app.middleware("http")
+async def _bind_correlation_id(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Bind a correlation ID to every log line emitted while handling this request.
+
+    Reuses the caller's ``X-Correlation-Id`` header if present, so a caller's own logs and this
+    service's logs can be joined on the same ID; generates one otherwise. Echoed back on the
+    response so a caller that didn't send one can still correlate afterward. Always cleared once
+    the request finishes, so it never leaks into a later, unrelated request's log lines.
+    """
+    correlation_id = request.headers.get("X-Correlation-Id") or str(uuid.uuid4())
+    bind_correlation_id(correlation_id)
+    try:
+        response = await call_next(request)
+        response.headers["X-Correlation-Id"] = correlation_id
+        return response
+    finally:
+        clear_request_context()
 
 
 def get_route_model_use_case(request: Request) -> RouteModelUseCase:

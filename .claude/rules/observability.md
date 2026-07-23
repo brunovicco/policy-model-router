@@ -16,4 +16,3 @@ paths:
 - Propagate W3C trace context across HTTP and messaging boundaries.
 - `print()` is prohibited in production code.
 - Call `configure_logging()` from `entrypoints/logging.py` once at process startup; never configure logging elsewhere.
-- LLM call tracing to Langfuse is opt-in and off by default; see `docs/LLM_OBSERVABILITY.md`. Never set `LANGFUSE_CAPTURE_CONTENT=true` without completing that document's approval checklist first.

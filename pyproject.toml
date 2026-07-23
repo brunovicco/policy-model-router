@@ -3,6 +3,8 @@ name = "policy-model-router"
 version = "0.1.0"
 description = "Deterministic, policy-based model-group router for governed LLM workloads"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13,<3.15"
 dependencies = [
     "fastapi>=0.115",
@@ -15,10 +17,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Opt-in LLM tracing; see docs/LLM_OBSERVABILITY.md. Install with `uv sync --extra tracing`.
-tracing = [
-    "langfuse>=3.0",
-]
 # Opt-in Redis-backed, cross-replica rate limiting; see ADR-0008. Install with
 # `uv sync --extra rate-limit`. Without it (or without REDIS_URL set), the service falls back to
 # the default in-memory, per-process limiter.
@@ -102,12 +100,6 @@ mypy_path = "src"
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_decorators = false
-
-[[tool.mypy.overrides]]
-# langfuse is the optional "tracing" extra; not installed by default, so no
-# stubs are available unless a project opts in with `uv sync --extra tracing`.
-module = ["langfuse"]
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # redis is the optional "rate-limit" extra; not installed by default, so no

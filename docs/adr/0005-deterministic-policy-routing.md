@@ -20,7 +20,7 @@ that does not yet exist and would make rejections harder to explain to an audito
 
 1. **Ordered eliminatory constraints.** `domain/constraints.py` defines a fixed tuple of pure
    predicates (`CONSTRAINTS`): data classification, risk level, structured output, tool calling,
-   context window, cost ceiling, latency ceiling, availability, agent allowlist — in that order. A
+   context window, cost ceiling, latency ceiling, availability, agent allowlist - in that order. A
    candidate model group is rejected at the first constraint it fails; the rejection reason is
    exactly that constraint's message. Order is part of the contract: changing it changes which
    reason is reported for a candidate that fails more than one constraint.
@@ -28,7 +28,7 @@ that does not yet exist and would make rejections harder to explain to an audito
    - Every model group in the policy is evaluated against all constraints for the request.
    - The workload's declaratively mapped model group (`config/routing_policy.yaml`) is selected
      only if it survived every constraint. If it did not, the use case raises
-     `NoViableModelGroupError` — a hard failure, not a silent reroute to another viable group.
+     `NoViableModelGroupError` - a hard failure, not a silent reroute to another viable group.
 3. **No weighted fallback in the MVP.** There is no scoring function and no substitution of a
    different group when the mapped one is rejected, even if another group is fully viable. This is
    an explicit MVP boundary, deferred to a later phase once per-workload evaluation data exists to
@@ -61,7 +61,7 @@ amendment" rather than a silent code change. This amendment is that update.
 `authorized_data_classifications` in shape but independent in meaning: a model group can be fully
 cleared for the data involved and still be unauthorized for a high-stakes decision. A new
 `check_risk_level` predicate was inserted into `CONSTRAINTS` immediately after
-`check_data_classification` — both are authorization-style checks, evaluated before the
+`check_data_classification` - both are authorization-style checks, evaluated before the
 functional/capacity checks that follow.
 
 **Rationale for the shipped values.** `config/routing_policy.yaml` authorizes `fast-small` and

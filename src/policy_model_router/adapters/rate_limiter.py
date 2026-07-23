@@ -72,3 +72,7 @@ class InMemoryRateLimiter:
     async def ping(self) -> None:
         """No-op: an in-process limiter has no backend to verify connectivity to."""
         return
+
+    async def close(self) -> None:
+        """No-op: an in-process limiter has no backend connection to release."""
+        return

@@ -116,7 +116,7 @@ Os quatro grupos estão marcados como disponíveis e sem restrição de lista de
 incluída. Altere esses valores deliberadamente para cada ambiente.
 
 Os valores de custo são estimativas próprias deste roteador, usadas como entrada da restrição
-determinística de custo — assim como `typical_latency_ms`, são números estáticos mantidos pelo
+determinística de custo - assim como `typical_latency_ms`, são números estáticos mantidos pelo
 autor da política, não um feed de preços sincronizado com nenhum provedor (veja a
 [ADR-0010](docs/adr/0010-token-based-cost-estimation.md)).
 
@@ -176,15 +176,24 @@ Exemplo de resposta:
   "rejected_candidates": [
     {
       "model_group": "fast-small",
-      "reason": "not authorized for data classification 'restricted'"
+      "reason": "not authorized for data classification 'restricted'",
+      "reason_code": "data_classification_not_authorized",
+      "observed_value": "restricted",
+      "required_value": "public, internal"
     },
     {
       "model_group": "fast-structured-output",
-      "reason": "not authorized for data classification 'restricted'"
+      "reason": "not authorized for data classification 'restricted'",
+      "reason_code": "data_classification_not_authorized",
+      "observed_value": "restricted",
+      "required_value": "public, internal"
     },
     {
       "model_group": "reasoning-medium",
-      "reason": "estimated context 100000 tokens exceeds group limit of 64000 tokens"
+      "reason": "estimated context 100000 tokens exceeds group limit of 64000 tokens",
+      "reason_code": "context_window_exceeded",
+      "observed_value": "100000",
+      "required_value": "<= 64000"
     }
   ],
   "policy_id": "credit-desk-routing",
@@ -197,10 +206,16 @@ Exemplo de resposta:
 
 `policy_id`/`policy_version`/`policy_digest` identificam exatamente qual política de roteamento
 produziu esta decisão (`policy_digest` é um hash `sha256` dos bytes brutos do YAML carregado,
-calculado no momento do carregamento — não é mantido manualmente, então muda sempre que o conteúdo
+calculado no momento do carregamento - não é mantido manualmente, então muda sempre que o conteúdo
 do arquivo muda, mesmo que ninguém tenha lembrado de incrementar `policy_version`);
 `service_version`/`environment` identificam o deployment que a produziu. Veja a
 [ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md).
+
+Cada candidato rejeitado também carrega um `reason_code` legível por máquina (um por restrição em
+[Ordem das restrições](#ordem-das-restrições), mais `workload_mapped_elsewhere` para um candidato
+que passou em todas as restrições mas simplesmente não é o grupo mapeado para a carga de trabalho),
+junto com `observed_value`/`required_value`, para que o chamador não precise interpretar o texto
+livre de `reason` para montar uma trilha de auditoria ou uma UI.
 
 ### Rejeição rígida
 
@@ -239,7 +254,7 @@ ser positivos.
 | `max_cost_usd` | Valor decimal positivo |
 
 `context_tokens_estimated` e `max_output_tokens_estimated` alimentam a restrição de custo: cada
-grupo de modelo é precificado por token (taxas separadas para entrada e saída — veja
+grupo de modelo é precificado por token (taxas separadas para entrada e saída - veja
 [Perfis dos grupos de modelo](#perfis-dos-grupos-de-modelo)), então o custo estimado de uma chamada
 é função do seu tamanho real, não um número fixo por grupo. Veja a
 [ADR-0010](docs/adr/0010-token-based-cost-estimation.md).
@@ -289,38 +304,38 @@ Outras configurações de runtime:
 
 `POST /route` exige um header `X-API-Key` válido, comparado (em tempo constante) contra a chave
 configurada para o próprio `agent_name` da requisição em `API_KEYS`. Uma chave ausente, incorreta,
-ou pertencente a outro agente sempre retorna `401 unauthorized` — a resposta nunca revela quais
+ou pertencente a outro agente sempre retorna `401 unauthorized` - a resposta nunca revela quais
 agentes estão configurados. A chave de um agente pode ser rotacionada ou revogada sem afetar os
 demais. Isso ainda não é um IAM completo: não há expiração de chave, escopo além de "pode chamar
-`/route` como este agente", nem garantia de identidade além de "sabia a chave certa" — veja a
+`/route` como este agente", nem garantia de identidade além de "sabia a chave certa" - veja a
 [emenda da ADR-0007](docs/adr/0007-http-boundary-hardening.md) para o que um mecanismo mais forte
 (mTLS, OAuth2 client credentials) acrescentaria.
 
 Também há rate limiting em dois níveis, ambos verificados *antes* da autenticação, para que
 tentativas repetidas com chave inválida também sejam limitadas: um nível leve por IP do cliente
 (`RATE_LIMIT_PER_IP_MAX_REQUESTS` por `RATE_LIMIT_WINDOW_SECONDS`), seguido de um nível por par
-`(IP, agent_name)` (`RATE_LIMIT_MAX_REQUESTS`) — o primeiro nível existe especificamente para que
+`(IP, agent_name)` (`RATE_LIMIT_MAX_REQUESTS`) - o primeiro nível existe especificamente para que
 um cliente não consiga escapar do segundo apenas variando o `agent_name` enviado a cada tentativa.
 Ultrapassar qualquer um dos dois retorna `429 rate_limit_exceeded`. Por padrão, ambos são
 contadores em memória, de janela fixa, **por processo**, cada um limitado a
-`RATE_LIMIT_MAX_TRACKED_KEYS` chaves distintas — um deployment com múltiplas instâncias aplica o
+`RATE_LIMIT_MAX_TRACKED_KEYS` chaves distintas - um deployment com múltiplas instâncias aplica o
 limite por instância, não de forma global no cluster (ADR-0007). Defina `REDIS_URL` (e instale
 `uv sync --extra rate-limit`) para compartilhar os dois níveis entre réplicas; use
 `docker compose up -d redis` para uma instância local. O limitador com Redis falha aberto em caso
 de erro no backend (permite a requisição em vez de bloquear o tráfego de roteamento por uma
 indisponibilidade não relacionada), mas falha fechado na inicialização se o Redis configurado
 estiver inacessível (ADR-0008). A linha de log de fail-open nunca inclui a chave bruta (que embute
-o IP do cliente) — apenas um fingerprint com chave HMAC, para que um operador consiga correlacionar
+o IP do cliente) - apenas um fingerprint com chave HMAC, para que um operador consiga correlacionar
 falhas repetidas sem que um atacante com acesso aos logs consiga enumerar e comparar o espaço de
 baixa entropia `(IP, agent_name)` contra um hash sem chave (veja a
 [terceira emenda da ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md)).
 
-O componente de IP da chave de rate limit é sempre o endereço bruto do peer TCP — este serviço
+O componente de IP da chave de rate limit é sempre o endereço bruto do peer TCP - este serviço
 nunca lê `X-Forwarded-For`/`Forwarded`. Atrás de um proxy reverso, todo cliente real compartilha o
 IP do proxy, colapsando a granularidade por cliente em um único balde; se precisar de granularidade
 real por cliente nessa topologia, configure o proxy para repassar um header confiável e configure o
 Uvicorn/Starlette para confiar apenas nesse salto específico (ex.: `--forwarded-allow-ips` restrito
-ao endereço do proxy) — nunca confie em headers repassados vindos de um conjunto irrestrito de
+ao endereço do proxy) - nunca confie em headers repassados vindos de um conjunto irrestrito de
 peers, ou qualquer cliente poderia forjar o header e multiplicar sua cota. Veja a
 [segunda emenda da ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md) para o racional completo.
 
@@ -330,7 +345,7 @@ peers, ou qualquer cliente poderia forjar o header e multiplicar sua cota. Veja 
 camada de aplicação resolve esse valor através de um port `AvailabilityProvider`
 ([ADR-0006](docs/adr/0006-availability-provider-port.md)); a única implementação incluída hoje,
 `StaticAvailabilityProvider`, apenas repassa esse flag sem alteração. Ainda não há verificação de
-saúde em tempo real de provedor/gateway — o port existe para que um adapter real possa ser
+saúde em tempo real de provedor/gateway - o port existe para que um adapter real possa ser
 adicionado depois, sem alterar o caso de uso de roteamento nem as restrições de domínio.
 
 ## Saúde, prontidão e métricas
@@ -346,7 +361,7 @@ padrão de processo/Python que o registry do `prometheus_client` sempre expõe),
 | `policy_model_router_route_rejections_total` | Counter | `workload`, `outcome` | Requisições que não produziram decisão (`no_viable_model_group`, `misconfigured_policy`) |
 | `policy_model_router_route_duration_seconds` | Histogram | `workload` | Tempo gasto avaliando uma decisão de roteamento |
 | `policy_model_router_rate_limit_decisions_total` | Counter | `tier` (`per_ip`, `per_agent`), `outcome` (`allowed`, `blocked`) | Decisões de admissão/bloqueio do rate limiter |
-| `policy_model_router_rate_limiter_backend_unavailable_total` | Counter | — | Requisições em que o rate limiter com Redis falhou aberto porque o Redis estava inacessível |
+| `policy_model_router_rate_limiter_backend_unavailable_total` | Counter | - | Requisições em que o rate limiter com Redis falhou aberto porque o Redis estava inacessível |
 
 Monitore `increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (somado
 entre réplicas) para detectar uma indisponibilidade prolongada do Redis em vez de depender só da
@@ -356,19 +371,28 @@ custo. `/readyz` é uma checagem rasa: não verifica o Redis mesmo quando `REDIS
 configurada, então "pronto" significa "inicialização concluída, incluindo uma checagem de
 conectividade com o Redis bem-sucedida naquele momento", não "o Redis está saudável agora".
 
-Nenhum dos três é restrito na camada de rede por este repositório — isso é uma preocupação de
+Nenhum dos três é restrito na camada de rede por este repositório - isso é uma preocupação de
 ingress/mesh, da mesma forma que colocar `/route` atrás de um gateway autenticado é. Em produção,
 restrinja `/metrics` (e, de forma mais leve, `/health`/`/readyz`) a scrapers/orquestradores
 internos.
 
 ## Container
 
-Construa e execute a imagem multi-stage e non-root:
+Construa e execute a imagem multi-stage e non-root. `API_KEYS` é obrigatória - o serviço recusa
+iniciar sem ela, no container da mesma forma que em qualquer outro lugar:
 
 ```bash
 docker build -t policy-model-router .
-docker run --rm -p 8000:8000 policy-model-router
+docker run --rm -p 8000:8000 \
+  -e API_KEYS='{"credit-analysis-agent":"dev-local-key"}' \
+  policy-model-router
 ```
+
+Monte um `routing_policy.yaml` customizado e aponte `ROUTING_POLICY_PATH` para ele para sobrescrever
+a política incluída; defina `REDIS_URL` (já inclui o extra `rate-limit`, sem passo de instalação
+adicional) para compartilhar o rate limit entre réplicas - veja
+[Configuração da política](#configuração-da-política) e
+[Autenticação e rate limiting](#autenticação-e-rate-limiting).
 
 Tags SemVer disparam o workflow de publicação do repositório, que constrói a imagem e envia suas
 tags versionadas para o GitHub Container Registry após o quality gate passar.
@@ -387,8 +411,7 @@ domain      -> no outer layer
   roteamento, e predicados de restrição puros;
 - `application`: caso de uso de roteamento determinístico e ports de clock/ID/disponibilidade;
 - `adapters`: carregador de política YAML, clock do sistema, gerador de UUID, provedor estático de
-  disponibilidade, rate limiter em memória (padrão) e rate limiter opcional com Redis, e suporte a
-  tracing opcional;
+  disponibilidade, rate limiter em memória (padrão) e rate limiter opcional com Redis;
 - `entrypoints`: contratos Pydantic de wire, endpoints FastAPI (`/route`, `/health`, `/readyz`),
   mapeamento de erros e logging estruturado.
 

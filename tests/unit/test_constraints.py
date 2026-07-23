@@ -16,7 +16,7 @@ from policy_model_router.domain.constraints import (
     check_structured_output,
     check_tool_calling,
 )
-from policy_model_router.domain.enums import DataClassification, RiskLevel
+from policy_model_router.domain.enums import DataClassification, ReasonCode, RiskLevel
 from policy_model_router.domain.routing import RouteRequest
 
 MakeRequest = Callable[..., RouteRequest]
@@ -58,7 +58,8 @@ def test_risk_level_rejects_when_group_is_not_authorized(
     reason = check_risk_level(request, profile, make_rule())
 
     assert reason is not None
-    assert "critical" in reason
+    assert "critical" in reason.message
+    assert reason.code == ReasonCode.RISK_LEVEL_NOT_AUTHORIZED
 
 
 def test_data_classification_passes_when_group_is_authorized(
@@ -81,7 +82,8 @@ def test_data_classification_rejects_when_group_is_not_authorized(
     reason = check_data_classification(request, profile, make_rule())
 
     assert reason is not None
-    assert "restricted" in reason
+    assert "restricted" in reason.message
+    assert reason.code == ReasonCode.DATA_CLASSIFICATION_NOT_AUTHORIZED
 
 
 def test_structured_output_passes_when_not_required(
@@ -247,3 +249,26 @@ def test_agent_allowlist_rejects_when_agent_is_not_listed(
     request = make_request(agent_name="cadastral-agent")
 
     assert check_agent_allowlist(request, profile, make_rule()) is not None
+
+
+def test_agent_allowlist_rejection_never_reveals_other_agents_names(
+    make_request: MakeRequest, make_profile: MakeProfile, make_rule: MakeRule
+) -> None:
+    """Regression test: this candidate's rejection reaches every authenticated caller via
+    ``rejected_candidates`` on an otherwise-successful ``/route`` response - not just the
+    requesting agent - so it must never include other configured agents' names, the same
+    guarantee ``entrypoints/http.py::_authenticate`` already makes for the auth failure path.
+    """
+    profile = make_profile(
+        allowed_agents=frozenset({"secret-internal-agent", "another-restricted-agent"})
+    )
+    request = make_request(agent_name="outsider-agent")
+
+    failure = check_agent_allowlist(request, profile, make_rule())
+
+    assert failure is not None
+    assert "secret-internal-agent" not in failure.message
+    assert "secret-internal-agent" not in failure.required_value
+    assert "another-restricted-agent" not in failure.message
+    assert "another-restricted-agent" not in failure.required_value
+    assert failure.observed_value == "outsider-agent"

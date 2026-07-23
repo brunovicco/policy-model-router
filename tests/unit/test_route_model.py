@@ -18,7 +18,13 @@ from policy_model_router.application.route_model import (
     RouteModelUseCase,
 )
 from policy_model_router.domain.catalog import ModelGroupProfile, RoutingPolicy, WorkloadRule
-from policy_model_router.domain.enums import DataClassification, ModelGroup, RiskLevel, Workload
+from policy_model_router.domain.enums import (
+    DataClassification,
+    ModelGroup,
+    ReasonCode,
+    RiskLevel,
+    Workload,
+)
 from policy_model_router.domain.routing import NoViableModelGroupError, RouteRequest
 
 MakeRequest = Callable[..., RouteRequest]
@@ -183,6 +189,15 @@ async def test_route_rejects_a_non_target_group_that_fails_a_constraint(
     reasons = {c.model_group: c.reason for c in decision.rejected_candidates}
     assert "restricted" in reasons[ModelGroup.FAST_SMALL]
     assert "restricted" in reasons[ModelGroup.FAST_STRUCTURED_OUTPUT]
+    codes = {c.model_group: c.reason_code for c in decision.rejected_candidates}
+    assert codes[ModelGroup.FAST_SMALL] == ReasonCode.DATA_CLASSIFICATION_NOT_AUTHORIZED
+    assert codes[ModelGroup.FAST_STRUCTURED_OUTPUT] == ReasonCode.DATA_CLASSIFICATION_NOT_AUTHORIZED
+    assert codes[ModelGroup.REASONING_STRONG] == ReasonCode.WORKLOAD_MAPPED_ELSEWHERE
+    mapped_elsewhere = next(
+        c for c in decision.rejected_candidates if c.model_group == ModelGroup.REASONING_STRONG
+    )
+    assert mapped_elsewhere.observed_value == Workload.CASHFLOW_ANALYSIS.value
+    assert mapped_elsewhere.required_value == ModelGroup.REASONING_MEDIUM.value
 
 
 @pytest.mark.anyio

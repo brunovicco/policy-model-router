@@ -19,7 +19,13 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints
 
-from policy_model_router.domain.enums import DataClassification, ModelGroup, RiskLevel, Workload
+from policy_model_router.domain.enums import (
+    DataClassification,
+    ModelGroup,
+    ReasonCode,
+    RiskLevel,
+    Workload,
+)
 from policy_model_router.domain.routing import RouteDecision as DomainRouteDecision
 from policy_model_router.domain.routing import RouteRequest as DomainRouteRequest
 
@@ -71,6 +77,9 @@ class RejectedCandidate(StrictContract):
 
     model_group: ModelGroup
     reason: _NonEmptyStr
+    reason_code: ReasonCode
+    observed_value: _NonEmptyStr
+    required_value: _NonEmptyStr
 
 
 class ModelRouteDecision(StrictContract):
@@ -121,7 +130,13 @@ def from_domain_decision(decision: DomainRouteDecision) -> ModelRouteDecision:
         selected_model_group=decision.selected_model_group,
         reason=decision.reason,
         rejected_candidates=tuple(
-            RejectedCandidate(model_group=candidate.model_group, reason=candidate.reason)
+            RejectedCandidate(
+                model_group=candidate.model_group,
+                reason=candidate.reason,
+                reason_code=candidate.reason_code,
+                observed_value=candidate.observed_value,
+                required_value=candidate.required_value,
+            )
             for candidate in decision.rejected_candidates
         ),
         policy_id=decision.policy_id,

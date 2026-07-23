@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog.contextvars
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from policy_model_router.entrypoints import http as http_module
 from policy_model_router.entrypoints.http import app
@@ -131,6 +133,42 @@ def test_startup_fails_closed_when_rate_limiter_backend_is_unreachable(
         pass
 
 
+def test_shutdown_closes_the_redis_rate_limiter_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both rate-limit tiers' Redis connections must be released on graceful shutdown."""
+    fake_redis_module = types.ModuleType("redis")
+    fake_asyncio_module = types.ModuleType("redis.asyncio")
+    closed_clients: list[Any] = []
+
+    class _TrackedClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        @classmethod
+        def from_url(cls, *_args: object, **_kwargs: object) -> "_TrackedClient":
+            return cls()
+
+        async def ping(self) -> None:
+            return
+
+        async def aclose(self) -> None:
+            closed_clients.append(self)
+
+    fake_asyncio_module.Redis = _TrackedClient  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "redis", fake_redis_module)
+    monkeypatch.setitem(sys.modules, "redis.asyncio", fake_asyncio_module)
+
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+
+    with TestClient(app):
+        pass
+
+    assert len(closed_clients) == 2
+
+
 def test_route_returns_the_decision_for_a_valid_request(client: TestClient) -> None:
     response = client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
 
@@ -141,11 +179,73 @@ def test_route_returns_the_decision_for_a_valid_request(client: TestClient) -> N
     assert body["task_id"] == "task-1"
     rejected_groups = {candidate["model_group"] for candidate in body["rejected_candidates"]}
     assert rejected_groups == {"fast-small", "reasoning-strong", "fast-structured-output"}
+    for candidate in body["rejected_candidates"]:
+        assert candidate["reason_code"]
+        assert candidate["observed_value"]
+        assert candidate["required_value"]
+    reasoning_strong = next(
+        c for c in body["rejected_candidates"] if c["model_group"] == "reasoning-strong"
+    )
+    assert reasoning_strong["reason_code"] == "workload_mapped_elsewhere"
     assert body["policy_id"]
     assert body["policy_version"]
     assert body["policy_digest"].startswith("sha256:")
     assert body["service_version"]
     assert body["environment"]
+
+
+def test_route_response_never_reveals_other_agents_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the agent-allowlist leak: an authenticated agent must never learn
+    which other agents are allowlisted for a restricted model group, via any field of any
+    candidate in an otherwise-successful ``/route`` response - mirroring the guarantee
+    ``_authenticate`` already makes on the auth-failure path.
+    """
+    restricted_policy_text = _SHIPPED_POLICY_PATH.read_text().replace(
+        "  fast-small:\n    authorized_data_classifications: [public, internal]\n"
+        "    authorized_risk_levels: [low, medium]\n"
+        "    supports_structured_output: false\n"
+        "    supports_tool_calling: true\n"
+        "    max_context_tokens: 16000\n"
+        "    typical_latency_ms: 3000\n"
+        '    input_cost_usd_per_million_tokens: "0.10"\n'
+        '    output_cost_usd_per_million_tokens: "0.40"\n'
+        "    available: true\n"
+        "    allowed_agents: []\n",
+        "  fast-small:\n    authorized_data_classifications: [public, internal]\n"
+        "    authorized_risk_levels: [low, medium]\n"
+        "    supports_structured_output: false\n"
+        "    supports_tool_calling: true\n"
+        "    max_context_tokens: 16000\n"
+        "    typical_latency_ms: 3000\n"
+        '    input_cost_usd_per_million_tokens: "0.10"\n'
+        '    output_cost_usd_per_million_tokens: "0.40"\n'
+        "    available: true\n"
+        "    allowed_agents: [secret-internal-agent, another-restricted-agent]\n",
+    )
+    assert "allowed_agents: [secret-internal-agent" in restricted_policy_text
+    policy_path = tmp_path / "routing_policy.yaml"
+    policy_path.write_text(restricted_policy_text, encoding="utf-8")
+
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(policy_path))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    with TestClient(app) as restricted_client:
+        response = restricted_client.post(
+            "/route",
+            json=_valid_payload(risk_level="low", data_classification="public"),
+            headers=_AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert "secret-internal-agent" not in response.text
+    assert "another-restricted-agent" not in response.text
+    fast_small = next(
+        c for c in response.json()["rejected_candidates"] if c["model_group"] == "fast-small"
+    )
+    assert fast_small["reason_code"] == "agent_not_allowed"
 
 
 def test_route_returns_a_stable_error_envelope_for_an_invalid_request(client: TestClient) -> None:
@@ -305,3 +405,91 @@ def test_metrics_endpoint_includes_route_metrics_after_a_request(client: TestCli
     assert "policy_model_router_route_duration_seconds" in response.text
     assert "policy_model_router_route_rejections_total" in response.text
     assert "policy_model_router_rate_limit_decisions_total" in response.text
+
+
+def test_route_echoes_the_callers_correlation_id(client: TestClient) -> None:
+    response = client.post(
+        "/route",
+        json=_valid_payload(),
+        headers={**_AUTH_HEADERS, "X-Correlation-Id": "caller-supplied-id"},
+    )
+
+    assert response.headers["X-Correlation-Id"] == "caller-supplied-id"
+
+
+def test_route_generates_a_correlation_id_when_the_caller_sends_none(client: TestClient) -> None:
+    response = client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
+
+    assert response.headers["X-Correlation-Id"]
+
+
+def test_health_endpoint_includes_a_correlation_id_header(client: TestClient) -> None:
+    response = client.get("/health")
+
+    assert response.headers["X-Correlation-Id"]
+
+
+def test_correlation_id_is_bound_to_log_lines_emitted_during_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A log line from an adapter mid-request (Redis fail-open) must carry the request's own ID."""
+    fake_redis_module = types.ModuleType("redis")
+    fake_asyncio_module = types.ModuleType("redis.asyncio")
+
+    class _FlakyClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        @classmethod
+        def from_url(cls, *_args: object, **_kwargs: object) -> "_FlakyClient":
+            return cls()
+
+        async def ping(self) -> None:
+            return
+
+        async def eval(self, *_args: object, **_kwargs: object) -> int:
+            raise ConnectionError("redis unreachable")
+
+        async def aclose(self) -> None:
+            return
+
+    fake_asyncio_module.Redis = _FlakyClient  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "redis", fake_redis_module)
+    monkeypatch.setitem(sys.modules, "redis.asyncio", fake_asyncio_module)
+
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+
+    with (
+        TestClient(app) as flaky_client,
+        capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs,
+    ):
+        response = flaky_client.post(
+            "/route",
+            json=_valid_payload(),
+            headers={**_AUTH_HEADERS, "X-Correlation-Id": "trace-me-123"},
+        )
+
+    assert response.status_code == 200
+    backend_logs = [log for log in logs if log["event"] == "rate_limiter_backend_unavailable"]
+    assert backend_logs
+    assert all(log["correlation_id"] == "trace-me-123" for log in backend_logs)
+
+
+def test_openapi_docs_are_disabled_by_default(client: TestClient) -> None:
+    assert client.get("/docs").status_code == 404
+    assert client.get("/redoc").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+
+
+def test_api_docs_enabled_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ENABLE_API_DOCS", raising=False)
+
+    assert http_module._api_docs_enabled() is False
+
+
+def test_api_docs_enabled_reads_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLE_API_DOCS", "true")
+
+    assert http_module._api_docs_enabled() is True
