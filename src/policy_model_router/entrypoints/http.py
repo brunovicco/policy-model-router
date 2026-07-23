@@ -13,6 +13,7 @@ every log line emitted while processing it - including from adapters like the Re
 carries the same ID; see ``entrypoints/logging.py``.
 """
 
+import asyncio
 import json
 import os
 import secrets
@@ -203,7 +204,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     Fails fast if the routing policy is missing/invalid, the API keys are not configured, or
     either rate limiter's backend (when Redis-backed) is not reachable. Closes both limiters'
     backend connections after the ``yield``, so a Redis-backed connection is released on graceful
-    shutdown rather than simply dropped.
+    shutdown rather than simply dropped; both are attempted (via ``asyncio.gather(...,
+    return_exceptions=True)``) even if one raises, so a failure releasing one tier's connection
+    can never skip releasing the other's.
     """
     settings = Settings()
     service_version = _service_version()
@@ -255,8 +258,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    await rate_limiter.close()
-    await ip_rate_limiter.close()
+    await asyncio.gather(rate_limiter.close(), ip_rate_limiter.close(), return_exceptions=True)
 
 
 _docs_enabled = _api_docs_enabled()

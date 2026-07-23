@@ -24,12 +24,15 @@ _KEY_PREFIX = "policy-model-router:rate-limit"
 
 # INCR and setting the TTL happen in one round trip so a crash between the two never leaves a
 # counter key without an expiry (which would otherwise block that key forever once it reached the
-# limit). Also repairs a key found without a TTL (KEY_TTL < 0) from before this script existed, or
-# from any other cause - self-healing rather than requiring an operator to intervene.
+# limit). Also repairs a key found without a TTL (KEY_PTTL < 0) from before this script existed, or
+# from any other cause - self-healing rather than requiring an operator to intervene. Millisecond
+# precision (PTTL/PEXPIRE, not TTL/EXPIRE): a sub-second RATE_LIMIT_WINDOW_SECONDS truncated to
+# whole seconds would pass EXPIRE a TTL of 0, which Redis treats as "delete immediately" - silently
+# disabling enforcement instead of shortening the window.
 _INCR_AND_EXPIRE_SCRIPT = """
 local count = redis.call('INCR', KEYS[1])
-if count == 1 or redis.call('TTL', KEYS[1]) < 0 then
-    redis.call('EXPIRE', KEYS[1], ARGV[1])
+if count == 1 or redis.call('PTTL', KEYS[1]) < 0 then
+    redis.call('PEXPIRE', KEYS[1], ARGV[1])
 end
 return count
 """
@@ -94,10 +97,9 @@ class RedisRateLimiter:
         without becoming a request-path failure.
         """
         full_key = f"{_KEY_PREFIX}:{key}"
+        window_ms = max(1, round(self._window_seconds * 1000))
         try:
-            count = await self._client.eval(
-                _INCR_AND_EXPIRE_SCRIPT, 1, full_key, int(self._window_seconds)
-            )
+            count = await self._client.eval(_INCR_AND_EXPIRE_SCRIPT, 1, full_key, window_ms)
         except Exception:
             BACKEND_UNAVAILABLE_TOTAL.inc()
             logger.warning(

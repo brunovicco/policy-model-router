@@ -45,6 +45,14 @@ so far are grouped under Unreleased.
   dropped.
 - `schema_version` in the routing policy file is now validated against the exact supported value
   instead of accepted as an arbitrary string.
+- A `RATE_LIMIT_WINDOW_SECONDS` value under one second no longer silently disables the Redis-backed
+  limiter: the atomic Lua script now sets the key's TTL in milliseconds (`PEXPIRE`) instead of
+  whole seconds (`EXPIRE`), which previously truncated any sub-second window to `0` - a TTL Redis
+  treats as "delete immediately," resetting the counter on every request.
+- Releasing one rate-limit tier's Redis connection on shutdown no longer skips releasing the
+  other's if the first `close()` raises.
+- `docs/DEVELOPMENT.md`'s `docker run`/`uvicorn` examples now include the required `API_KEYS`,
+  matching `README.md`'s.
 
 ### Security
 

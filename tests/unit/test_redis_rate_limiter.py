@@ -37,11 +37,13 @@ class _FakeRedisClient:
         self._has_ttl: set[str] = set()
         self.closed = False
 
-    async def eval(self, _script: str, _numkeys: int, key: str, window_seconds: int) -> int:
-        """Increment ``key`` and set its TTL if this is the first hit or the TTL is missing."""
+    async def eval(self, _script: str, _numkeys: int, key: str, window_ms: int) -> int:
+        """Increment ``key`` and set its TTL (in milliseconds) if this is the first hit or the
+        TTL is missing.
+        """
         self.counts[key] = self.counts.get(key, 0) + 1
         if key not in self._has_ttl:
-            self.expirations[key] = window_seconds
+            self.expirations[key] = window_ms
             self._has_ttl.add(key)
         return self.counts[key]
 
@@ -112,7 +114,7 @@ async def test_sets_expiry_only_on_the_first_request_of_a_window() -> None:
     await limiter.allow("key")
 
     assert len(client.expirations) == 1
-    assert next(iter(client.expirations.values())) == 42
+    assert next(iter(client.expirations.values())) == 42_000
 
 
 @pytest.mark.anyio
@@ -127,7 +129,7 @@ async def test_repairs_a_missing_ttl_on_a_key_that_already_has_hits() -> None:
 
     await limiter.allow("key")
 
-    assert client.expirations[full_key] == 42
+    assert client.expirations[full_key] == 42_000
 
 
 @pytest.mark.anyio
