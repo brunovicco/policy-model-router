@@ -179,6 +179,13 @@ def check_agent_allowlist(
     """Reject a group whose allowlist excludes the requesting agent.
 
     An empty allowlist means the group has no per-agent restriction.
+
+    ``required_value`` deliberately never lists ``profile.allowed_agents``: this candidate's
+    rejection reason reaches every authenticated caller via ``rejected_candidates`` on an
+    otherwise-successful ``/route`` response (not just the requesting agent), and
+    ``entrypoints/http.py::_authenticate`` already treats configured agent identities as
+    something the response must never reveal - this constraint must not undo that by a different
+    path.
     """
     if not profile.allowed_agents or request.agent_name in profile.allowed_agents:
         return None
@@ -186,7 +193,7 @@ def check_agent_allowlist(
         code=ReasonCode.AGENT_NOT_ALLOWED,
         message=f"agent {request.agent_name!r} is not in this group's allowlist",
         observed_value=request.agent_name,
-        required_value=", ".join(sorted(profile.allowed_agents)),
+        required_value="an agent in this group's allowlist",
     )
 
 

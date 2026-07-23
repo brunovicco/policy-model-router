@@ -52,3 +52,9 @@ so far are grouped under Unreleased.
   opt in for local development).
 - Removed the unused, Langfuse-based LLM call tracing adapter: this service never calls an LLM, so
   there was nothing for it to trace.
+- Fixed an information-disclosure regression introduced alongside the structured `reason_code`
+  work above: a restricted model group's rejection no longer includes the names of the other
+  agents allowlisted for it. That candidate's rejection reaches every authenticated caller via
+  `rejected_candidates` on an otherwise-successful `/route` response, not just the requesting
+  agent, so it must never reveal other agents' identities - the same guarantee `_authenticate`
+  already makes on the auth-failure path.

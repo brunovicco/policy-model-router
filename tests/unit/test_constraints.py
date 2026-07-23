@@ -249,3 +249,26 @@ def test_agent_allowlist_rejects_when_agent_is_not_listed(
     request = make_request(agent_name="cadastral-agent")
 
     assert check_agent_allowlist(request, profile, make_rule()) is not None
+
+
+def test_agent_allowlist_rejection_never_reveals_other_agents_names(
+    make_request: MakeRequest, make_profile: MakeProfile, make_rule: MakeRule
+) -> None:
+    """Regression test: this candidate's rejection reaches every authenticated caller via
+    ``rejected_candidates`` on an otherwise-successful ``/route`` response - not just the
+    requesting agent - so it must never include other configured agents' names, the same
+    guarantee ``entrypoints/http.py::_authenticate`` already makes for the auth failure path.
+    """
+    profile = make_profile(
+        allowed_agents=frozenset({"secret-internal-agent", "another-restricted-agent"})
+    )
+    request = make_request(agent_name="outsider-agent")
+
+    failure = check_agent_allowlist(request, profile, make_rule())
+
+    assert failure is not None
+    assert "secret-internal-agent" not in failure.message
+    assert "secret-internal-agent" not in failure.required_value
+    assert "another-restricted-agent" not in failure.message
+    assert "another-restricted-agent" not in failure.required_value
+    assert failure.observed_value == "outsider-agent"

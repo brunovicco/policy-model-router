@@ -194,6 +194,60 @@ def test_route_returns_the_decision_for_a_valid_request(client: TestClient) -> N
     assert body["environment"]
 
 
+def test_route_response_never_reveals_other_agents_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the agent-allowlist leak: an authenticated agent must never learn
+    which other agents are allowlisted for a restricted model group, via any field of any
+    candidate in an otherwise-successful ``/route`` response - mirroring the guarantee
+    ``_authenticate`` already makes on the auth-failure path.
+    """
+    restricted_policy_text = _SHIPPED_POLICY_PATH.read_text().replace(
+        "  fast-small:\n    authorized_data_classifications: [public, internal]\n"
+        "    authorized_risk_levels: [low, medium]\n"
+        "    supports_structured_output: false\n"
+        "    supports_tool_calling: true\n"
+        "    max_context_tokens: 16000\n"
+        "    typical_latency_ms: 3000\n"
+        '    input_cost_usd_per_million_tokens: "0.10"\n'
+        '    output_cost_usd_per_million_tokens: "0.40"\n'
+        "    available: true\n"
+        "    allowed_agents: []\n",
+        "  fast-small:\n    authorized_data_classifications: [public, internal]\n"
+        "    authorized_risk_levels: [low, medium]\n"
+        "    supports_structured_output: false\n"
+        "    supports_tool_calling: true\n"
+        "    max_context_tokens: 16000\n"
+        "    typical_latency_ms: 3000\n"
+        '    input_cost_usd_per_million_tokens: "0.10"\n'
+        '    output_cost_usd_per_million_tokens: "0.40"\n'
+        "    available: true\n"
+        "    allowed_agents: [secret-internal-agent, another-restricted-agent]\n",
+    )
+    assert "allowed_agents: [secret-internal-agent" in restricted_policy_text
+    policy_path = tmp_path / "routing_policy.yaml"
+    policy_path.write_text(restricted_policy_text, encoding="utf-8")
+
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(policy_path))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    with TestClient(app) as restricted_client:
+        response = restricted_client.post(
+            "/route",
+            json=_valid_payload(risk_level="low", data_classification="public"),
+            headers=_AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert "secret-internal-agent" not in response.text
+    assert "another-restricted-agent" not in response.text
+    fast_small = next(
+        c for c in response.json()["rejected_candidates"] if c["model_group"] == "fast-small"
+    )
+    assert fast_small["reason_code"] == "agent_not_allowed"
+
+
 def test_route_returns_a_stable_error_envelope_for_an_invalid_request(client: TestClient) -> None:
     response = client.post(
         "/route", json=_valid_payload(workload="not_a_real_workload"), headers=_AUTH_HEADERS
