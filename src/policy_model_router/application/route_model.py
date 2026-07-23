@@ -19,6 +19,7 @@ from policy_model_router.domain.enums import ModelGroup, ReasonCode
 from policy_model_router.domain.routing import (
     NoViableModelGroupError,
     RejectedCandidate,
+    RejectedDecision,
     RouteDecision,
     RouteRequest,
 )
@@ -85,7 +86,26 @@ class RouteModelUseCase:
         selected = workload_rule.model_group
         if selected in rejection_reasons:
             failure = rejection_reasons[selected]
-            raise NoViableModelGroupError(request.workload, selected, failure.message, failure.code)
+            raise NoViableModelGroupError(
+                RejectedDecision(
+                    schema_version=request.schema_version,
+                    routing_decision_id=self._id_generator.new_id(),
+                    decided_at=self._clock.now(),
+                    workflow_id=request.workflow_id,
+                    task_id=request.task_id,
+                    workload=request.workload,
+                    rejected_model_group=selected,
+                    reason=failure.message,
+                    reason_code=failure.code,
+                    observed_value=failure.observed_value,
+                    required_value=failure.required_value,
+                    policy_id=self._policy.policy_id,
+                    policy_version=self._policy.policy_version,
+                    policy_digest=self._policy.policy_digest,
+                    service_version=self._service_version,
+                    environment=self._environment,
+                )
+            )
 
         def _to_rejected_candidate(model_group: ModelGroup) -> RejectedCandidate:
             failure = rejection_reasons.get(model_group)

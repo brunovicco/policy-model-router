@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated, Protocol
 
+import structlog
 from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -44,6 +45,7 @@ from policy_model_router.entrypoints.contracts import (
     ModelRouteDecision,
     ModelRouteRequest,
     from_domain_decision,
+    from_domain_rejection,
     to_domain_request,
 )
 from policy_model_router.entrypoints.logging import (
@@ -75,6 +77,8 @@ RATE_LIMIT_DECISIONS_TOTAL = Counter(
     "Rate limiter admit/block decisions, labeled by tier (per_ip, per_agent) and outcome.",
     ["tier", "outcome"],
 )
+
+logger = structlog.get_logger(__name__)
 
 
 class RateLimiter(Protocol):
@@ -334,8 +338,20 @@ async def _handle_validation_error(_request: Request, _exc: RequestValidationErr
 async def _handle_no_viable_model_group(
     _request: Request, exc: NoViableModelGroupError
 ) -> JSONResponse:
-    """Map a hard routing failure (target group ineligible, no MVP fallback) to a 422 envelope."""
-    return _error_response(422, "no_viable_model_group", str(exc))
+    """Map a hard routing failure to a 422 envelope, with the full rejected decision's provenance.
+
+    ``error.code``/``error.message`` are unchanged from before this decision gained provenance;
+    the ``decision`` key is purely additive, mirroring how ADR-0009 added provenance fields to the
+    success response without breaking existing consumers.
+    """
+    rejection = from_domain_rejection(exc.decision)
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {"code": "no_viable_model_group", "message": str(exc)},
+            "decision": rejection.model_dump(mode="json"),
+        },
+    )
 
 
 @app.exception_handler(IncompleteRoutingPolicyError)
@@ -423,8 +439,22 @@ async def route(
     started_at = time.monotonic()
     try:
         decision = await use_case.route(to_domain_request(request))
-    except NoViableModelGroupError:
+    except NoViableModelGroupError as exc:
         ROUTE_REJECTIONS_TOTAL.labels(workload=workload, outcome="no_viable_model_group").inc()
+        logger.info(
+            "routing_decision",
+            outcome="rejected",
+            routing_decision_id=exc.decision.routing_decision_id,
+            workflow_id=exc.decision.workflow_id,
+            task_id=exc.decision.task_id,
+            workload=workload,
+            model_group=exc.decision.rejected_model_group.value,
+            reason_code=exc.decision.reason_code.value,
+            policy_id=exc.decision.policy_id,
+            policy_version=exc.decision.policy_version,
+            policy_digest=exc.decision.policy_digest,
+            duration_ms=round((time.monotonic() - started_at) * 1000, 3),
+        )
         raise
     except IncompleteRoutingPolicyError:
         ROUTE_REJECTIONS_TOTAL.labels(workload=workload, outcome="misconfigured_policy").inc()
@@ -435,4 +465,17 @@ async def route(
     ROUTE_DECISIONS_TOTAL.labels(
         workload=workload, model_group=decision.selected_model_group.value
     ).inc()
+    logger.info(
+        "routing_decision",
+        outcome="accepted",
+        routing_decision_id=decision.routing_decision_id,
+        workflow_id=decision.workflow_id,
+        task_id=decision.task_id,
+        workload=workload,
+        model_group=decision.selected_model_group.value,
+        policy_id=decision.policy_id,
+        policy_version=decision.policy_version,
+        policy_digest=decision.policy_digest,
+        duration_ms=round((time.monotonic() - started_at) * 1000, 3),
+    )
     return from_domain_decision(decision)

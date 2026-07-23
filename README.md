@@ -223,11 +223,33 @@ shipped policy. The router does not silently promote the request to a stronger g
   "error": {
     "code": "no_viable_model_group",
     "message": "no viable model group for workload 'document_extraction': mapped group 'fast-small' rejected (not authorized for data classification 'confidential')"
+  },
+  "decision": {
+    "schema_version": "1.0",
+    "routing_decision_id": "8f2c1e3a-...",
+    "decided_at": "2026-07-23T12:00:01Z",
+    "workflow_id": "credit-review-42",
+    "task_id": "extract-docs-1",
+    "workload": "document_extraction",
+    "rejected_model_group": "fast-small",
+    "reason": "not authorized for data classification 'confidential'",
+    "reason_code": "data_classification_not_authorized",
+    "observed_value": "confidential",
+    "required_value": "public, internal",
+    "policy_id": "credit-desk-routing",
+    "policy_version": "1.0.0",
+    "policy_digest": "sha256:2f1a...c9",
+    "service_version": "0.2.0",
+    "environment": "production"
   }
 }
 ```
 
-The response status is `422 Unprocessable Entity`.
+The response status is `422 Unprocessable Entity`. `error.code`/`error.message` are the original,
+stable error envelope; `decision` is additive - a rejection carries exactly the same provenance
+(`routing_decision_id`, `decided_at`, and the five policy/deployment identity fields) as an
+accepted decision, so it is exactly as auditable (see
+[ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md)).
 
 ## API contract
 
@@ -357,9 +379,17 @@ routing use case or the domain constraints.
 
 Alert on `increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (summed
 across replicas) to catch a sustained Redis outage instead of relying on the
-`rate_limiter_backend_unavailable` log line alone. None of the three endpoints in this section
-requires `X-API-Key` or counts against the rate limit, so orchestrators and scrapers can probe them
-cheaply. `/readyz` is a shallow check: it does not probe Redis even when `REDIS_URL` is configured,
+`rate_limiter_backend_unavailable` log line alone.
+
+Every `POST /route` call also emits a structured `routing_decision` log line (`outcome=accepted` or
+`outcome=rejected`) carrying `routing_decision_id`, `workflow_id`, `task_id`, `workload`, the
+relevant model group, `reason_code` (rejections only), the policy identity fields, and
+`duration_ms` - no prompt or payload content, per `docs/PRIVACY.md`. This is a log line, not a
+durable audit store; see [ADR-0009's amendment](docs/adr/0009-policy-identity-and-decision-provenance.md).
+
+None of the three endpoints in this section requires `X-API-Key` or counts against the rate limit,
+so orchestrators and scrapers can probe them cheaply. `/readyz` is a shallow check: it does not
+probe Redis even when `REDIS_URL` is configured,
 so "ready" means "startup completed, including a successful Redis connectivity check at that
 moment," not "Redis is healthy right now."
 

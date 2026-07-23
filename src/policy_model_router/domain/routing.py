@@ -80,6 +80,35 @@ class RouteDecision:
     environment: str
 
 
+@dataclass(frozen=True, slots=True)
+class RejectedDecision:
+    """The outcome of a routing decision whose mapped model group failed a hard constraint.
+
+    Carries the same five identity fields (``policy_id``/``policy_version``/``policy_digest``/
+    ``service_version``/``environment``) plus ``routing_decision_id``/``decided_at`` as a
+    successful :class:`RouteDecision`, so a rejection is exactly as auditable as an acceptance -
+    only the outcome-specific fields (``rejected_model_group``, ``reason``, ``reason_code``,
+    ``observed_value``, ``required_value``) differ.
+    """
+
+    schema_version: str
+    routing_decision_id: str
+    decided_at: datetime
+    workflow_id: str
+    task_id: str
+    workload: Workload
+    rejected_model_group: ModelGroup
+    reason: str
+    reason_code: ReasonCode
+    observed_value: str
+    required_value: str
+    policy_id: str
+    policy_version: str
+    policy_digest: str
+    service_version: str
+    environment: str
+
+
 class NoViableModelGroupError(Exception):
     """Raised when the workload's mapped model group fails an eliminatory constraint.
 
@@ -88,19 +117,10 @@ class NoViableModelGroupError(Exception):
     be routed is a hard failure the caller must handle, not a silent reroute.
     """
 
-    def __init__(
-        self,
-        workload: Workload,
-        model_group: ModelGroup,
-        reason: str,
-        reason_code: ReasonCode,
-    ) -> None:
-        """Record the workload, its mapped (and rejected) model group, and the reason."""
+    def __init__(self, decision: RejectedDecision) -> None:
+        """Record the full rejected decision, so it is exactly as auditable as an acceptance."""
         super().__init__(
-            f"no viable model group for workload {workload.value!r}: "
-            f"mapped group {model_group.value!r} rejected ({reason})"
+            f"no viable model group for workload {decision.workload.value!r}: "
+            f"mapped group {decision.rejected_model_group.value!r} rejected ({decision.reason})"
         )
-        self.workload = workload
-        self.model_group = model_group
-        self.reason = reason
-        self.reason_code = reason_code
+        self.decision = decision

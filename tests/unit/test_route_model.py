@@ -231,8 +231,19 @@ async def test_route_raises_when_the_workload_mapped_group_itself_is_eliminated(
     with pytest.raises(NoViableModelGroupError) as excinfo:
         await use_case.route(request)
 
-    assert excinfo.value.model_group == ModelGroup.FAST_SMALL
-    assert excinfo.value.workload == Workload.DOCUMENT_EXTRACTION
+    decision = excinfo.value.decision
+    assert decision.rejected_model_group == ModelGroup.FAST_SMALL
+    assert decision.workload == Workload.DOCUMENT_EXTRACTION
+    assert decision.routing_decision_id == "decision-1"
+    assert decision.decided_at == _FIXED_NOW
+    assert decision.workflow_id == request.workflow_id
+    assert decision.task_id == request.task_id
+    assert decision.reason_code == ReasonCode.DATA_CLASSIFICATION_NOT_AUTHORIZED
+    assert decision.policy_id == _TEST_POLICY_ID
+    assert decision.policy_version == _TEST_POLICY_VERSION
+    assert decision.policy_digest == _TEST_POLICY_DIGEST
+    assert decision.service_version == _TEST_SERVICE_VERSION
+    assert decision.environment == _TEST_ENVIRONMENT
 
 
 @pytest.mark.anyio
@@ -287,8 +298,8 @@ async def test_route_rejects_the_mapped_group_when_risk_level_is_not_authorized(
     with pytest.raises(NoViableModelGroupError) as excinfo:
         await use_case.route(request)
 
-    assert excinfo.value.model_group == ModelGroup.REASONING_MEDIUM
-    assert "critical" in excinfo.value.reason
+    assert excinfo.value.decision.rejected_model_group == ModelGroup.REASONING_MEDIUM
+    assert "critical" in excinfo.value.decision.reason
 
 
 class _AlwaysUnavailable:
@@ -316,5 +327,5 @@ async def test_route_rejects_a_group_the_availability_provider_marks_unavailable
     with pytest.raises(NoViableModelGroupError) as excinfo:
         await use_case.route(request)
 
-    assert excinfo.value.model_group == ModelGroup.REASONING_MEDIUM
-    assert "unavailable" in excinfo.value.reason
+    assert excinfo.value.decision.rejected_model_group == ModelGroup.REASONING_MEDIUM
+    assert "unavailable" in excinfo.value.decision.reason
