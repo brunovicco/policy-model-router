@@ -93,8 +93,9 @@ ADR's original decision used for the success contract.
 
 **A structured log event, for both outcomes.** `entrypoints/http.py`'s `/route` handler now emits
 a `"routing_decision"` structlog event (`outcome=accepted|rejected`) for every request, carrying
-`routing_decision_id`, `workflow_id`, `task_id`, `workload`, the relevant model group,
-`reason_code` (rejections only), the three policy identity fields, and `duration_ms`.
+`routing_decision_id`, `workload`, the relevant model group, `reason_code` (rejections only), the
+three policy identity fields, and `duration_ms`. Caller-supplied `workflow_id` and `task_id` are
+deliberately excluded so the event matches `docs/PRIVACY.md`.
 `service`/`environment`/`version`/`correlation_id` need no explicit passing - already bound once
 via `structlog.contextvars` (`configure_logging` at startup, `bind_correlation_id` per request).
 This is deliberately a log line, not a durable/immutable audit store: no such infrastructure exists

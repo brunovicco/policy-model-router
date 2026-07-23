@@ -36,10 +36,12 @@ shared across replicas or worker processes** - each instance enforces its own li
 
 **Health and readiness endpoints.** `GET /health` always returns `200 {"status": "ok"}` once the
 process is serving - a liveness probe. `GET /readyz` returns `200 {"status": "ready"}` once the
-lifespan has finished loading the routing policy - a readiness probe, but a shallow one: this
-service has no external dependency to check (per ADR-0004), so "ready" means "startup completed,"
-not "a downstream system is healthy." Neither endpoint requires the API key or is rate-limited, so
-orchestrators and load balancers can probe them cheaply and without credentials.
+lifespan has finished loading the routing policy - a readiness probe, but a shallow one. At the
+time of this decision the service had no external dependency to check; ADR-0008 later added an
+optional Redis dependency that is probed once at startup, not on each `/readyz` call. "Ready"
+therefore means "startup completed," not "every runtime dependency is currently healthy." Neither
+endpoint requires the API key or is rate-limited, so orchestrators and load balancers can probe
+them cheaply and without credentials.
 
 ## Consequences
 

@@ -28,9 +28,10 @@
 # exercised by dedicated fixtures in the test suite.
 #
 # policy_id/policy_version identify this policy in every routing decision it produces (see
-# domain/catalog.py::RoutingPolicy); the loader also computes a sha256 digest of this file's raw
-# bytes at load time, so a decision is traceable to exactly what content was loaded, not just to
-# whichever policy_version the author remembered to bump.
+# domain/catalog.py::RoutingPolicy); the loader also computes a sha256 digest of this file's
+# decoded text with normalized line endings at load time, so a decision is traceable to the
+# effective content that was loaded, not just to whichever policy_version the author remembered
+# to bump.
 #
 # input_cost_usd_per_million_tokens/output_cost_usd_per_million_tokens are this router's own
 # illustrative price-per-token figures, in the same spirit as typical_latency_ms: a static input
