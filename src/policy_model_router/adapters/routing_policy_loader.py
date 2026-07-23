@@ -5,6 +5,7 @@ incomplete catalog/workload coverage) raises :class:`RoutingPolicyLoadError` rat
 back to a partial or default policy.
 """
 
+import hashlib
 import types
 from collections.abc import Mapping
 from decimal import Decimal
@@ -34,7 +35,8 @@ class _ModelGroupProfileConfig(BaseModel):
     supports_tool_calling: bool
     max_context_tokens: Annotated[int, Field(gt=0)]
     typical_latency_ms: Annotated[int, Field(gt=0)]
-    estimated_cost_usd: Annotated[Decimal, Field(gt=0)]
+    input_cost_usd_per_million_tokens: Annotated[Decimal, Field(ge=0)]
+    output_cost_usd_per_million_tokens: Annotated[Decimal, Field(ge=0)]
     available: bool
     allowed_agents: list[str]
 
@@ -54,6 +56,8 @@ class _RoutingPolicyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: str
+    policy_id: Annotated[str, Field(min_length=1)]
+    policy_version: Annotated[str, Field(min_length=1)]
     model_groups: dict[ModelGroup, _ModelGroupProfileConfig]
     workloads: dict[Workload, _WorkloadRuleConfig]
 
@@ -71,7 +75,7 @@ class _RoutingPolicyConfig(BaseModel):
         return self
 
 
-def _to_domain(config: _RoutingPolicyConfig) -> RoutingPolicy:
+def _to_domain(config: _RoutingPolicyConfig, *, policy_digest: str) -> RoutingPolicy:
     model_groups: Mapping[ModelGroup, ModelGroupProfile] = types.MappingProxyType(
         {
             group: ModelGroupProfile(
@@ -81,7 +85,8 @@ def _to_domain(config: _RoutingPolicyConfig) -> RoutingPolicy:
                 supports_tool_calling=profile.supports_tool_calling,
                 max_context_tokens=profile.max_context_tokens,
                 typical_latency_ms=profile.typical_latency_ms,
-                estimated_cost_usd=profile.estimated_cost_usd,
+                input_cost_usd_per_million_tokens=profile.input_cost_usd_per_million_tokens,
+                output_cost_usd_per_million_tokens=profile.output_cost_usd_per_million_tokens,
                 available=profile.available,
                 allowed_agents=frozenset(profile.allowed_agents),
             )
@@ -99,6 +104,9 @@ def _to_domain(config: _RoutingPolicyConfig) -> RoutingPolicy:
     )
     return RoutingPolicy(
         schema_version=config.schema_version,
+        policy_id=config.policy_id,
+        policy_version=config.policy_version,
+        policy_digest=policy_digest,
         model_groups=model_groups,
         workloads=workloads,
     )
@@ -131,4 +139,6 @@ def load_routing_policy(path: Path) -> RoutingPolicy:
             f"routing policy file {path} does not match the expected schema: {exc}"
         ) from exc
 
-    return _to_domain(config)
+    policy_digest = f"sha256:{hashlib.sha256(raw_text.encode('utf-8')).hexdigest()}"
+
+    return _to_domain(config, policy_digest=policy_digest)

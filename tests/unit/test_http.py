@@ -43,6 +43,7 @@ def _valid_payload(**overrides: Any) -> dict[str, Any]:
         "risk_level": "high",
         "data_classification": "internal",
         "context_tokens_estimated": 1_000,
+        "max_output_tokens_estimated": 500,
         "structured_output_required": False,
         "max_latency_ms": 60_000,
         "max_cost_usd": 1.0,
@@ -140,6 +141,11 @@ def test_route_returns_the_decision_for_a_valid_request(client: TestClient) -> N
     assert body["task_id"] == "task-1"
     rejected_groups = {candidate["model_group"] for candidate in body["rejected_candidates"]}
     assert rejected_groups == {"fast-small", "reasoning-strong", "fast-structured-output"}
+    assert body["policy_id"]
+    assert body["policy_version"]
+    assert body["policy_digest"].startswith("sha256:")
+    assert body["service_version"]
+    assert body["environment"]
 
 
 def test_route_returns_a_stable_error_envelope_for_an_invalid_request(client: TestClient) -> None:
@@ -224,6 +230,50 @@ def test_route_is_rate_limited_per_client_and_agent(monkeypatch: pytest.MonkeyPa
     }
 
 
+def test_invalid_api_key_attempts_are_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rate limiting runs before authentication, so brute-forcing a key is throttled too."""
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setenv("RATE_LIMIT_MAX_REQUESTS", "1")
+    wrong_key_headers = {"X-API-Key": "wrong-key"}
+
+    with TestClient(app) as rate_limited_client:
+        first = rate_limited_client.post("/route", json=_valid_payload(), headers=wrong_key_headers)
+        second = rate_limited_client.post(
+            "/route", json=_valid_payload(), headers=wrong_key_headers
+        )
+
+    assert first.status_code == 401
+    assert second.status_code == 429
+
+
+def test_route_is_rate_limited_per_client_ip_even_when_agent_name_varies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-IP tier closes the bypass where an attacker varies agent_name per attempt."""
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setenv("RATE_LIMIT_PER_IP_MAX_REQUESTS", "1")
+    wrong_key_headers = {"X-API-Key": "wrong-key"}
+
+    with TestClient(app) as rate_limited_client:
+        first = rate_limited_client.post(
+            "/route",
+            json=_valid_payload(agent_name="agent-one"),
+            headers=wrong_key_headers,
+        )
+        second = rate_limited_client.post(
+            "/route",
+            json=_valid_payload(agent_name="agent-two"),
+            headers=wrong_key_headers,
+        )
+
+    assert first.status_code == 401
+    assert second.status_code == 429
+
+
 def test_health_endpoint_requires_no_api_key(client: TestClient) -> None:
     response = client.get("/health")
 
@@ -244,3 +294,14 @@ def test_metrics_endpoint_requires_no_api_key(client: TestClient) -> None:
     assert response.status_code == 200
     assert "text/plain" in response.headers["content-type"]
     assert "policy_model_router_rate_limiter_backend_unavailable_total" in response.text
+
+
+def test_metrics_endpoint_includes_route_metrics_after_a_request(client: TestClient) -> None:
+    client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
+
+    response = client.get("/metrics")
+
+    assert "policy_model_router_route_decisions_total" in response.text
+    assert "policy_model_router_route_duration_seconds" in response.text
+    assert "policy_model_router_route_rejections_total" in response.text
+    assert "policy_model_router_rate_limit_decisions_total" in response.text

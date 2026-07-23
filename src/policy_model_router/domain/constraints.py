@@ -74,12 +74,19 @@ def check_context_window(
 def check_max_cost(
     request: RouteRequest, profile: ModelGroupProfile, _rule: WorkloadRule
 ) -> str | None:
-    """Reject a group whose estimated cost exceeds the request's cost ceiling."""
-    if profile.estimated_cost_usd <= request.max_cost_usd:
+    """Reject a group whose token-based estimated cost exceeds the request's cost ceiling.
+
+    Estimated cost is ``context_tokens_estimated`` (input) and ``max_output_tokens_estimated``
+    (output) priced at the group's per-million-token rates - not a single flat number per group.
+    """
+    estimated_cost = profile.estimated_cost(
+        input_tokens=request.context_tokens_estimated,
+        output_tokens=request.max_output_tokens_estimated,
+    )
+    if estimated_cost <= request.max_cost_usd:
         return None
     return (
-        f"estimated cost {profile.estimated_cost_usd} usd exceeds "
-        f"request ceiling of {request.max_cost_usd} usd"
+        f"estimated cost {estimated_cost} usd exceeds request ceiling of {request.max_cost_usd} usd"
     )
 
 

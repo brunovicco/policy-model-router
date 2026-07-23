@@ -25,6 +25,11 @@ MakeRequest = Callable[..., RouteRequest]
 MakeProfile = Callable[..., ModelGroupProfile]
 MakeRule = Callable[..., WorkloadRule]
 _FIXED_NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+_TEST_POLICY_ID = "test-policy"
+_TEST_POLICY_VERSION = "1.0.0"
+_TEST_POLICY_DIGEST = "sha256:test"
+_TEST_SERVICE_VERSION = "0.0.0-test"
+_TEST_ENVIRONMENT = "test"
 
 
 class _FixedClock:
@@ -59,7 +64,8 @@ def reference_policy(make_profile: MakeProfile, make_rule: MakeRule) -> RoutingP
                 supports_structured_output=False,
                 max_context_tokens=16_000,
                 typical_latency_ms=3_000,
-                estimated_cost_usd=Decimal("0.01"),
+                input_cost_usd_per_million_tokens=Decimal("0.10"),
+                output_cost_usd_per_million_tokens=Decimal("0.40"),
             ),
             ModelGroup.REASONING_MEDIUM: make_profile(
                 authorized_data_classifications=local_backed,
@@ -67,7 +73,8 @@ def reference_policy(make_profile: MakeProfile, make_rule: MakeRule) -> RoutingP
                 supports_structured_output=False,
                 max_context_tokens=64_000,
                 typical_latency_ms=15_000,
-                estimated_cost_usd=Decimal("0.05"),
+                input_cost_usd_per_million_tokens=Decimal("0.50"),
+                output_cost_usd_per_million_tokens=Decimal("1.50"),
             ),
             ModelGroup.REASONING_STRONG: make_profile(
                 authorized_data_classifications=local_backed,
@@ -75,7 +82,8 @@ def reference_policy(make_profile: MakeProfile, make_rule: MakeRule) -> RoutingP
                 supports_structured_output=False,
                 max_context_tokens=128_000,
                 typical_latency_ms=30_000,
-                estimated_cost_usd=Decimal("0.20"),
+                input_cost_usd_per_million_tokens=Decimal("2.00"),
+                output_cost_usd_per_million_tokens=Decimal("8.00"),
             ),
             ModelGroup.FAST_STRUCTURED_OUTPUT: make_profile(
                 authorized_data_classifications=external_only,
@@ -84,7 +92,8 @@ def reference_policy(make_profile: MakeProfile, make_rule: MakeRule) -> RoutingP
                 supports_tool_calling=False,
                 max_context_tokens=8_000,
                 typical_latency_ms=2_000,
-                estimated_cost_usd=Decimal("0.01"),
+                input_cost_usd_per_million_tokens=Decimal("0.10"),
+                output_cost_usd_per_million_tokens=Decimal("0.40"),
             ),
         }
     )
@@ -97,7 +106,14 @@ def reference_policy(make_profile: MakeProfile, make_rule: MakeRule) -> RoutingP
             Workload.JSON_REPAIR: make_rule(model_group=ModelGroup.FAST_STRUCTURED_OUTPUT),
         }
     )
-    return RoutingPolicy(schema_version="1.0", model_groups=model_groups, workloads=workloads)
+    return RoutingPolicy(
+        schema_version="1.0",
+        policy_id=_TEST_POLICY_ID,
+        policy_version=_TEST_POLICY_VERSION,
+        policy_digest=_TEST_POLICY_DIGEST,
+        model_groups=model_groups,
+        workloads=workloads,
+    )
 
 
 @pytest.fixture
@@ -108,9 +124,12 @@ def use_case(reference_policy: RoutingPolicy) -> RouteModelUseCase:
         clock=_FixedClock(),
         id_generator=_FixedIdGenerator(),
         availability=StaticAvailabilityProvider(),
+        service_version=_TEST_SERVICE_VERSION,
+        environment=_TEST_ENVIRONMENT,
     )
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("workload", "expected_group"),
     [
@@ -121,7 +140,7 @@ def use_case(reference_policy: RoutingPolicy) -> RouteModelUseCase:
         (Workload.JSON_REPAIR, ModelGroup.FAST_STRUCTURED_OUTPUT),
     ],
 )
-def test_route_selects_the_workload_mapped_group_when_it_is_viable(
+async def test_route_selects_the_workload_mapped_group_when_it_is_viable(
     workload: Workload,
     expected_group: ModelGroup,
     use_case: RouteModelUseCase,
@@ -135,15 +154,21 @@ def test_route_selects_the_workload_mapped_group_when_it_is_viable(
         context_tokens_estimated=100,
     )
 
-    decision = use_case.route(request)
+    decision = await use_case.route(request)
 
     assert decision.selected_model_group == expected_group
     rejected_groups = {candidate.model_group for candidate in decision.rejected_candidates}
     assert rejected_groups == set(ModelGroup) - {expected_group}
     assert all(candidate.reason for candidate in decision.rejected_candidates)
+    assert decision.policy_id == _TEST_POLICY_ID
+    assert decision.policy_version == _TEST_POLICY_VERSION
+    assert decision.policy_digest == _TEST_POLICY_DIGEST
+    assert decision.service_version == _TEST_SERVICE_VERSION
+    assert decision.environment == _TEST_ENVIRONMENT
 
 
-def test_route_rejects_a_non_target_group_that_fails_a_constraint(
+@pytest.mark.anyio
+async def test_route_rejects_a_non_target_group_that_fails_a_constraint(
     use_case: RouteModelUseCase, make_request: MakeRequest
 ) -> None:
     request = make_request(
@@ -152,7 +177,7 @@ def test_route_rejects_a_non_target_group_that_fails_a_constraint(
         max_latency_ms=60_000,
     )
 
-    decision = use_case.route(request)
+    decision = await use_case.route(request)
 
     assert decision.selected_model_group == ModelGroup.REASONING_MEDIUM
     reasons = {c.model_group: c.reason for c in decision.rejected_candidates}
@@ -160,7 +185,8 @@ def test_route_rejects_a_non_target_group_that_fails_a_constraint(
     assert "restricted" in reasons[ModelGroup.FAST_STRUCTURED_OUTPUT]
 
 
-def test_route_rejects_multiple_groups_via_different_constraints_simultaneously(
+@pytest.mark.anyio
+async def test_route_rejects_multiple_groups_via_different_constraints_simultaneously(
     use_case: RouteModelUseCase, make_request: MakeRequest
 ) -> None:
     request = make_request(
@@ -170,7 +196,7 @@ def test_route_rejects_multiple_groups_via_different_constraints_simultaneously(
         max_latency_ms=60_000,
     )
 
-    decision = use_case.route(request)
+    decision = await use_case.route(request)
 
     assert decision.selected_model_group == ModelGroup.REASONING_STRONG
     reasons = {c.model_group: c.reason for c in decision.rejected_candidates}
@@ -178,7 +204,8 @@ def test_route_rejects_multiple_groups_via_different_constraints_simultaneously(
     assert "context" in reasons[ModelGroup.REASONING_MEDIUM]
 
 
-def test_route_raises_when_the_workload_mapped_group_itself_is_eliminated(
+@pytest.mark.anyio
+async def test_route_raises_when_the_workload_mapped_group_itself_is_eliminated(
     use_case: RouteModelUseCase, make_request: MakeRequest
 ) -> None:
     request = make_request(
@@ -187,17 +214,21 @@ def test_route_raises_when_the_workload_mapped_group_itself_is_eliminated(
     )
 
     with pytest.raises(NoViableModelGroupError) as excinfo:
-        use_case.route(request)
+        await use_case.route(request)
 
     assert excinfo.value.model_group == ModelGroup.FAST_SMALL
     assert excinfo.value.workload == Workload.DOCUMENT_EXTRACTION
 
 
-def test_route_raises_incomplete_policy_error_when_workload_has_no_mapping(
+@pytest.mark.anyio
+async def test_route_raises_incomplete_policy_error_when_workload_has_no_mapping(
     make_request: MakeRequest,
 ) -> None:
     empty_policy = RoutingPolicy(
         schema_version="1.0",
+        policy_id=_TEST_POLICY_ID,
+        policy_version=_TEST_POLICY_VERSION,
+        policy_digest=_TEST_POLICY_DIGEST,
         model_groups=types.MappingProxyType({}),
         workloads=types.MappingProxyType({}),
     )
@@ -206,26 +237,30 @@ def test_route_raises_incomplete_policy_error_when_workload_has_no_mapping(
         clock=_FixedClock(),
         id_generator=_FixedIdGenerator(),
         availability=StaticAvailabilityProvider(),
+        service_version=_TEST_SERVICE_VERSION,
+        environment=_TEST_ENVIRONMENT,
     )
 
     with pytest.raises(IncompleteRoutingPolicyError):
-        empty_use_case.route(make_request(workload=Workload.CASHFLOW_ANALYSIS))
+        await empty_use_case.route(make_request(workload=Workload.CASHFLOW_ANALYSIS))
 
 
-def test_route_is_deterministic_for_the_same_request(
+@pytest.mark.anyio
+async def test_route_is_deterministic_for_the_same_request(
     use_case: RouteModelUseCase, make_request: MakeRequest
 ) -> None:
     request = make_request(
         workload=Workload.CASHFLOW_ANALYSIS, risk_level=RiskLevel.HIGH, max_latency_ms=60_000
     )
 
-    first = use_case.route(request)
-    second = use_case.route(request)
+    first = await use_case.route(request)
+    second = await use_case.route(request)
 
     assert first == second
 
 
-def test_route_rejects_the_mapped_group_when_risk_level_is_not_authorized(
+@pytest.mark.anyio
+async def test_route_rejects_the_mapped_group_when_risk_level_is_not_authorized(
     use_case: RouteModelUseCase, make_request: MakeRequest
 ) -> None:
     request = make_request(
@@ -235,7 +270,7 @@ def test_route_rejects_the_mapped_group_when_risk_level_is_not_authorized(
     )
 
     with pytest.raises(NoViableModelGroupError) as excinfo:
-        use_case.route(request)
+        await use_case.route(request)
 
     assert excinfo.value.model_group == ModelGroup.REASONING_MEDIUM
     assert "critical" in excinfo.value.reason
@@ -244,12 +279,13 @@ def test_route_rejects_the_mapped_group_when_risk_level_is_not_authorized(
 class _AlwaysUnavailable:
     """Availability provider stub that overrides every group to unavailable."""
 
-    def is_available(self, _model_group: ModelGroup, _declared_available: bool) -> bool:
+    async def is_available(self, _model_group: ModelGroup, _declared_available: bool) -> bool:
         """Always report unavailable, regardless of the policy's declared flag."""
         return False
 
 
-def test_route_rejects_a_group_the_availability_provider_marks_unavailable(
+@pytest.mark.anyio
+async def test_route_rejects_a_group_the_availability_provider_marks_unavailable(
     reference_policy: RoutingPolicy, make_request: MakeRequest
 ) -> None:
     use_case = RouteModelUseCase(
@@ -257,11 +293,13 @@ def test_route_rejects_a_group_the_availability_provider_marks_unavailable(
         clock=_FixedClock(),
         id_generator=_FixedIdGenerator(),
         availability=_AlwaysUnavailable(),
+        service_version=_TEST_SERVICE_VERSION,
+        environment=_TEST_ENVIRONMENT,
     )
     request = make_request(workload=Workload.CASHFLOW_ANALYSIS, max_latency_ms=60_000)
 
     with pytest.raises(NoViableModelGroupError) as excinfo:
-        use_case.route(request)
+        await use_case.route(request)
 
     assert excinfo.value.model_group == ModelGroup.REASONING_MEDIUM
     assert "unavailable" in excinfo.value.reason

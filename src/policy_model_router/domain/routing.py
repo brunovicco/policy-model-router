@@ -25,6 +25,7 @@ class RouteRequest:
     risk_level: RiskLevel
     data_classification: DataClassification
     context_tokens_estimated: int
+    max_output_tokens_estimated: int
     structured_output_required: bool
     max_latency_ms: int
     max_cost_usd: Decimal
@@ -40,7 +41,13 @@ class RejectedCandidate:
 
 @dataclass(frozen=True, slots=True)
 class RouteDecision:
-    """The outcome of a model-routing decision, including every rejected candidate."""
+    """The outcome of a model-routing decision, including every rejected candidate.
+
+    ``policy_id``/``policy_version``/``policy_digest`` identify the loaded routing policy that
+    produced this decision (see ``domain/catalog.py::RoutingPolicy``); ``service_version`` and
+    ``environment`` identify the deployment that produced it. Together they make a decision
+    reproducible and auditable: two decisions can only be assumed equivalent if all five match.
+    """
 
     schema_version: str
     routing_decision_id: str
@@ -50,6 +57,11 @@ class RouteDecision:
     selected_model_group: ModelGroup
     reason: str
     rejected_candidates: tuple[RejectedCandidate, ...]
+    policy_id: str
+    policy_version: str
+    policy_digest: str
+    service_version: str
+    environment: str
 
 
 class NoViableModelGroupError(Exception):

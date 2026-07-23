@@ -106,8 +106,8 @@ Enforced by `scripts/validate_architecture.py` as part of the quality gate.
 ## Cross-cutting decisions
 
 - **Configuration**: `ROUTING_POLICY_PATH`, `APP_ENV`, `LOG_LEVEL`, `LOG_FORMAT`, `API_KEYS`,
-  `RATE_LIMIT_MAX_REQUESTS`, `RATE_LIMIT_WINDOW_SECONDS` as environment variables; no other runtime
-  configuration.
+  `RATE_LIMIT_MAX_REQUESTS`, `RATE_LIMIT_PER_IP_MAX_REQUESTS`, `RATE_LIMIT_WINDOW_SECONDS`,
+  `RATE_LIMIT_FINGERPRINT_SECRET` as environment variables; no other runtime configuration.
 - **Logging**: structured JSON to stdout via `configure_logging()`; no prompt, response, or
   personal-data content is logged.
 - **Tracing**: metadata-only by default; see `docs/LLM_OBSERVABILITY.md` for the content-tracing
@@ -116,19 +116,27 @@ Enforced by `scripts/validate_architecture.py` as part of the quality gate.
   `agent_name`), required to start the service and checked with a constant-time comparison; not
   full IAM — no expiry, scoping, or identity assurance beyond "knew the right key" (ADR-0007,
   amended).
-- **Rate limiting**: fixed-window, per `(client IP, agent_name)`; per-process by default
+- **Rate limiting**: two fixed-window tiers, both checked before authentication - a light tier per
+  client IP alone, then a tier per `(client IP, agent_name)`, closing the bypass where varying
+  `agent_name` would otherwise dodge the second tier; per-process by default
   (`InMemoryRateLimiter`), optionally shared across replicas via Redis when `REDIS_URL` is set
-  (`RedisRateLimiter`, ADR-0007, ADR-0008).
+  (`RedisRateLimiter`, ADR-0007, ADR-0008's third amendment). The Redis-backed limiter's fail-open
+  log fingerprint is HMAC-keyed (`RATE_LIMIT_FINGERPRINT_SECRET`, or a random per-process secret),
+  not a plain hash.
 - **Metrics**: `GET /metrics` exposes Prometheus-format output (`prometheus_client`, a required
-  dependency); today this is limited to
-  `policy_model_router_rate_limiter_backend_unavailable_total` (ADR-0008's amendment). No metrics
-  exist yet for `/route` outcomes, latency, or the in-memory rate limiter.
+  dependency), including per-`/route`-outcome counters and a duration histogram (both labeled by
+  `workload`), a rate-limit admit/block counter (labeled by tier), and the Redis backend-failure
+  counter (ADR-0008's amendments).
 - **Errors**: domain errors (`NoViableModelGroupError`, `IncompleteRoutingPolicyError`) and HTTP
   boundary errors (`AuthenticationError`, `RateLimitExceededError`) are mapped to a stable JSON
   error envelope in `http.py`; no internal exception detail is returned to the caller.
 - **Time**: UTC, timezone-aware `datetime` throughout (`RouteRequest.requested_at`,
   `RouteDecision.decided_at`).
-- **Money**: `Decimal` for `estimated_cost_usd` and `max_cost_usd`.
+- **Money**: `Decimal` throughout - `ModelGroupProfile.input_cost_usd_per_million_tokens`/
+  `output_cost_usd_per_million_tokens` and `RouteRequest.max_cost_usd` (ADR-0010).
+- **Decision provenance**: every `RouteDecision` carries `policy_id`/`policy_version`/
+  `policy_digest` (the loaded policy's identity, the last computed at load time from the raw YAML
+  bytes) and `service_version`/`environment` (the deployment's identity) (ADR-0009).
 - **Idempotency**: `POST /route` is a pure decision over caller-supplied input and the loaded
   policy; it has no side effects to deduplicate. `routing_decision_id` is generated per call and is
   not a dedupe key.
@@ -149,8 +157,15 @@ Enforced by `scripts/validate_architecture.py` as part of the quality gate.
   `/health`/`/readyz` endpoints.
 - [ADR-0008](adr/0008-redis-shared-rate-limiter.md): optional Redis-backed rate limiter shared
   across replicas, fail-open at runtime, fail-closed at startup; amended to add a real-Redis
-  integration test (run in CI), a `GET /metrics` counter for backend failures, and (from a
-  security review) a hashed log key, a bounded in-memory limiter, and network/proxy-trust guidance.
+  integration test (run in CI), a `GET /metrics` counter for backend failures, (from a security
+  review) a hashed log key, a bounded in-memory limiter, and network/proxy-trust guidance, and (a
+  further review) a Docker image that actually ships the `redis` extra, a second rate-limit tier
+  keyed by client IP alone, and an HMAC-keyed (not plain-hashed) fail-open log fingerprint.
+- [ADR-0009](adr/0009-policy-identity-and-decision-provenance.md): every routing decision carries
+  the identity of the policy and deployment that produced it (`policy_id`/`policy_version`/
+  `policy_digest`/`service_version`/`environment`).
+- [ADR-0010](adr/0010-token-based-cost-estimation.md): the cost constraint estimates cost from
+  request token counts and per-token rates, not one flat number per model group.
 - [architecture-blueprint.md](architecture-blueprint.md): the data-classification authorization
   invariant this router enforces on behalf of the platform.
 
@@ -161,11 +176,11 @@ should not be assumed fixed:
 
 | Gap | Current state | Consequence |
 |---|---|---|
-| No live availability signal | `AvailabilityProvider` (ADR-0006) is a real seam, but the only shipped implementation (`StaticAvailabilityProvider`) still just passes through the static YAML flag; nothing polls provider/gateway health | A group can be selected while its actual deployments are down; the policy file must be edited and the service redeployed to reflect an outage. Not resolved: no real health-check target exists yet to poll — adding one now would mean integrating against a system that isn't there |
-| `/readyz` is a shallow check | Returns ready once startup completed; there is no external dependency to probe (ADR-0004) | Cannot detect a policy that loaded successfully but is semantically wrong for the environment |
-| Redis-backed rate limiting has no metric beyond one counter | `/metrics` exposes only `policy_model_router_rate_limiter_backend_unavailable_total` (ADR-0008's amendment) | No visibility into allow/reject rates, latency, or the in-memory limiter; and nothing scrapes/alerts on the counter unless the deployment wires up its own Prometheus + alert rule — this repo only exposes the endpoint |
-| `/metrics` (and `/health`/`/readyz`) have no network-level restriction configured in this repo | Unauthenticated and unthrottled by design (ADR-0007), matching common health/scrape-probe practice; no ingress/mesh boundary is defined in `Dockerfile`/`docker-compose.yml` | Anyone who can reach the port can read metrics (minor recon: process/GC stats, one counter). Operators must restrict this at the ingress/mesh layer themselves — same as the existing "deploy `/route` behind an authenticated gateway" requirement |
-| Rate-limit key trusts only the raw TCP peer address | `entrypoints/http.py` never reads `X-Forwarded-For`/`Forwarded`; no `ProxyHeadersMiddleware`, no `--forwarded-allow-ips` | Behind a reverse proxy, every real client shares the proxy's IP as the key's IP component, collapsing per-client granularity to one bucket. A deployment that later enables proxy-header trust *without* restricting it to the proxy's own address would let any client forge the header and multiply its quota — a known misconfiguration to avoid, not current behavior |
+| No live availability signal | `AvailabilityProvider` (ADR-0006, amended to be `async`) is a real seam, but the only shipped implementation (`StaticAvailabilityProvider`) still just passes through the static YAML flag; nothing polls provider/gateway health | A group can be selected while its actual deployments are down; the policy file must be edited and the service redeployed to reflect an outage. Not resolved: no real health-check target exists yet to poll — adding one now would mean integrating against a system that isn't there |
+| `/readyz` does not probe Redis | Returns ready once startup completed - including a successful `ping()` of the rate limiter's Redis backend, when `REDIS_URL` is configured, but only at that one moment (ADR-0004, ADR-0008) | Cannot detect a Redis outage, or a policy that loaded successfully but is semantically wrong for the environment, once the process is already running |
+| `/metrics` (and `/health`/`/readyz`) have no network-level restriction configured in this repo | Unauthenticated and unthrottled by design (ADR-0007), matching common health/scrape-probe practice; no ingress/mesh boundary is defined in `Dockerfile`/`docker-compose.yml` | Anyone who can reach the port can read metrics (minor recon: process/GC stats, `/route` outcome counts). Operators must restrict this at the ingress/mesh layer themselves — same as the existing "deploy `/route` behind an authenticated gateway" requirement |
+| Rate-limit key trusts only the raw TCP peer address | `entrypoints/http.py` never reads `X-Forwarded-For`/`Forwarded`; no `ProxyHeadersMiddleware`, no `--forwarded-allow-ips` | Behind a reverse proxy, every real client shares the proxy's IP as the key's IP component, collapsing per-client granularity to one bucket (for both rate-limit tiers). A deployment that later enables proxy-header trust *without* restricting it to the proxy's own address would let any client forge the header and multiply its quota — a known misconfiguration to avoid, not current behavior |
+| `credit_desk_contracts` mirror has no automated compatibility check | `entrypoints/contracts.py` originally mirrored `credit_desk_contracts.routing` field-for-field by hand; ADR-0009 and ADR-0010 added fields the external monorepo does not have yet, and there is still no shared package, published JSON Schema, or contract test between the two repos | The two contracts can drift silently; the external monorepo must be updated by hand to match, and nothing in this repo's CI would catch a future divergence |
 
 **Resolved:** the API key was a single shared secret for the whole service; ADR-0007's 2026-07-22
 amendment replaced it with per-agent keys (`API_KEYS`), so one agent's key can be rotated or
@@ -176,8 +191,18 @@ service in CI) and a `GET /metrics` counter for backend failures. A security rev
 also found the rate-limit key (which embeds the client IP) logged in plain text on a Redis
 fail-open, and `InMemoryRateLimiter`'s tracked-key dict growing without bound; both are fixed
 (ADR-0008's second amendment: a hashed log fingerprint, and an `OrderedDict` capped at
-`RATE_LIMIT_MAX_TRACKED_KEYS`). All resolutions have documented residual limits above and in their
-ADRs — none is full IAM, a highly available rate-limiting service, or a complete metrics surface.
+`RATE_LIMIT_MAX_TRACKED_KEYS`). A further review found the Docker image did not ship the `redis`
+extra at all, that varying `agent_name` bypassed the per-agent rate-limit tier entirely, and that
+the fail-open fingerprint was an unkeyed hash enumerable from log access alone; all three are fixed
+(ADR-0008's third amendment: `--extra rate-limit` in `Dockerfile`, a second rate-limit tier keyed by
+client IP alone, and an HMAC-keyed fingerprint). `/route` previously exposed no metrics beyond the
+Redis failure counter and no decision provenance beyond a bare `routing_decision_id`; both are fixed
+(`GET /metrics` now includes per-outcome counters and a duration histogram, ADR-0009 added
+`policy_id`/`policy_version`/`policy_digest`/`service_version`/`environment` to every decision).
+`check_max_cost` previously compared one flat number per model group regardless of request size;
+ADR-0010 made it a function of the request's actual estimated input/output token counts. All
+resolutions have documented residual limits above and in their ADRs — none is full IAM, a highly
+available rate-limiting service, a complete metrics surface, or a live-pricing cost model.
 
 Add fallback/scoring behavior, a live health check, or stronger identity/HA guarantees only against
 a concrete requirement (an incident, a threat model, or an evaluation dataset for tie-breaking) —
@@ -185,8 +210,8 @@ not speculatively.
 
 ## Diagrams
 
-The sequence for one routing decision, after the `X-API-Key` check and rate-limit check both pass
-(ADR-0007):
+The sequence for one routing decision, after both rate-limit tiers and the `X-API-Key` check all
+pass, in that order (ADR-0007, ADR-0008's third amendment):
 
 ```mermaid
 sequenceDiagram

@@ -30,13 +30,13 @@ class IdGenerator(Protocol):
 class AvailabilityProvider(Protocol):
     """Port for resolving a model group's effective availability at decision time.
 
-    Exists so the availability signal can later be backed by a live provider/gateway health
-    check without changing :class:`~policy_model_router.application.route_model.RouteModelUseCase`
-    or the domain constraints. No implementation shipped today calls out over the network; see
-    ADR-0006.
+    Async (ADR-0006's amendment) so a future live provider/gateway health check can await a
+    network call without blocking the event loop or every other concurrent ``/route`` request.
+    No implementation shipped today calls out over the network; :class:`StaticAvailabilityProvider`
+    awaits nothing and returns immediately.
     """
 
-    def is_available(self, model_group: ModelGroup, declared_available: bool) -> bool:
+    async def is_available(self, model_group: ModelGroup, declared_available: bool) -> bool:
         """Return whether ``model_group`` is available, given its policy-declared default.
 
         Args:

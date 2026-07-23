@@ -26,7 +26,18 @@
 # false by default because agents call MCP tools through their own tool-orchestration layer, not
 # through the LLM's native function-calling API - both fields are still fully enforced and are
 # exercised by dedicated fixtures in the test suite.
+#
+# policy_id/policy_version identify this policy in every routing decision it produces (see
+# domain/catalog.py::RoutingPolicy); the loader also computes a sha256 digest of this file's raw
+# bytes at load time, so a decision is traceable to exactly what content was loaded, not just to
+# whichever policy_version the author remembered to bump.
+#
+# input_cost_usd_per_million_tokens/output_cost_usd_per_million_tokens are this router's own
+# illustrative price-per-token figures, in the same spirit as typical_latency_ms: a static input
+# to the deterministic cost constraint, not a live pricing feed from any provider.
 schema_version: "1.0"
+policy_id: "credit-desk-routing"
+policy_version: "1.0.0"
 
 model_groups:
   fast-small:
@@ -36,7 +47,8 @@ model_groups:
     supports_tool_calling: true
     max_context_tokens: 16000
     typical_latency_ms: 3000
-    estimated_cost_usd: "0.01"
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
     available: true
     allowed_agents: []
 
@@ -47,7 +59,8 @@ model_groups:
     supports_tool_calling: true
     max_context_tokens: 64000
     typical_latency_ms: 15000
-    estimated_cost_usd: "0.05"
+    input_cost_usd_per_million_tokens: "0.50"
+    output_cost_usd_per_million_tokens: "1.50"
     available: true
     allowed_agents: []
 
@@ -58,7 +71,8 @@ model_groups:
     supports_tool_calling: true
     max_context_tokens: 128000
     typical_latency_ms: 30000
-    estimated_cost_usd: "0.20"
+    input_cost_usd_per_million_tokens: "2.00"
+    output_cost_usd_per_million_tokens: "8.00"
     available: true
     allowed_agents: []
 
@@ -69,7 +83,8 @@ model_groups:
     supports_tool_calling: false
     max_context_tokens: 8000
     typical_latency_ms: 2000
-    estimated_cost_usd: "0.01"
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
     available: true
     allowed_agents: []
 

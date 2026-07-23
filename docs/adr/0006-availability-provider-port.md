@@ -48,3 +48,23 @@ Introduce the seam without introducing the network call:
 - Tests exercise the seam directly: `tests/unit/test_route_model.py` includes a fake
   `AvailabilityProvider` that overrides a policy-declared-available group to unavailable, proving
   the use case actually consults the port rather than reading `profile.available` on its own.
+
+## Amendment (2026-07-22): the port is async, ahead of any implementation that needs it
+
+A code review of the shipped seam noted that `AvailabilityProvider.is_available` and
+`RouteModelUseCase.route` were both synchronous, called from an `async def` FastAPI handler. That
+was harmless with `StaticAvailabilityProvider` (no I/O), but a future adapter calling a real
+provider/gateway health endpoint would have to either block the event loop on every `/route`
+request or force a disruptive signature change once that adapter existed.
+
+**Decision.** `AvailabilityProvider.is_available` and `RouteModelUseCase.route` are now `async
+def`. `StaticAvailabilityProvider.is_available` awaits nothing and returns immediately - identical
+behavior to before, just through an `async` method. `entrypoints/http.py`'s `route` handler now
+`await`s `use_case.route(...)`.
+
+**Consequences.** No behavior change today, same as the original ADR. A future live-health adapter
+can now `await` its own network call directly, with bounded timeout/retry of its own choosing,
+without a second signature migration. `tests/unit/test_availability.py` and
+`tests/unit/test_route_model.py` were updated to `await` accordingly; this is a purely mechanical
+consequence of async propagating through the call chain, the same kind of change ADR-0008 made to
+`RateLimiter.allow`/`ping`.

@@ -98,18 +98,22 @@ Values are deployment-policy inputs, not live provider measurements.
 
 ### Model-group profiles
 
-| Model group | Authorized data | Authorized risk | Structured output | Tool calling | Context | Typical latency | Estimated cost |
+| Model group | Authorized data | Authorized risk | Structured output | Tool calling | Context | Typical latency | Cost (input / output, per M tokens) |
 |---|---|---|---:|---:|---:|---:|---:|
-| `fast-small` | public, internal | low, medium | No | Yes | 16,000 | 3,000 ms | USD 0.01 |
-| `reasoning-medium` | public, internal, confidential, restricted | low, medium, high | No | Yes | 64,000 | 15,000 ms | USD 0.05 |
-| `reasoning-strong` | public, internal, confidential, restricted | low, medium, high, critical | No | Yes | 128,000 | 30,000 ms | USD 0.20 |
-| `fast-structured-output` | public, internal | low, medium | Yes | No | 8,000 | 2,000 ms | USD 0.01 |
+| `fast-small` | public, internal | low, medium | No | Yes | 16,000 | 3,000 ms | USD 0.10 / 0.40 |
+| `reasoning-medium` | public, internal, confidential, restricted | low, medium, high | No | Yes | 64,000 | 15,000 ms | USD 0.50 / 1.50 |
+| `reasoning-strong` | public, internal, confidential, restricted | low, medium, high, critical | No | Yes | 128,000 | 30,000 ms | USD 2.00 / 8.00 |
+| `fast-structured-output` | public, internal | low, medium | Yes | No | 8,000 | 2,000 ms | USD 0.10 / 0.40 |
 
 The authorized-risk column reflects a decision-quality rule, not a data-protection one: a group can
 be fully cleared for the data involved and still be unauthorized for a high-stakes decision (see
 [ADR-0005's amendment](docs/adr/0005-deterministic-policy-routing.md)). All four groups are marked
 available and have unrestricted agent allowlists in the shipped policy. Change those values
 deliberately for each environment.
+
+Cost figures are this router's own illustrative price-per-token inputs to the deterministic cost
+constraint — like `typical_latency_ms`, a static number the policy author maintains, not a live
+feed synced from any provider (see [ADR-0010](docs/adr/0010-token-based-cost-estimation.md)).
 
 ## Quick start
 
@@ -146,6 +150,7 @@ curl --request POST http://127.0.0.1:8000/route \
     "risk_level": "high",
     "data_classification": "restricted",
     "context_tokens_estimated": 100000,
+    "max_output_tokens_estimated": 2000,
     "structured_output_required": false,
     "max_latency_ms": 60000,
     "max_cost_usd": 1.00
@@ -176,9 +181,20 @@ Example response:
       "model_group": "reasoning-medium",
       "reason": "estimated context 100000 tokens exceeds group limit of 64000 tokens"
     }
-  ]
+  ],
+  "policy_id": "credit-desk-routing",
+  "policy_version": "1.0.0",
+  "policy_digest": "sha256:2f1a...c9",
+  "service_version": "0.1.0",
+  "environment": "production"
 }
 ```
+
+`policy_id`/`policy_version`/`policy_digest` identify exactly which routing policy produced this
+decision (`policy_digest` is a `sha256` hash of the loaded YAML file's raw bytes, computed at
+load time — not hand-maintained, so it changes whenever the file's content changes even if nobody
+remembered to bump `policy_version`); `service_version`/`environment` identify the deployment that
+produced it. See [ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md).
 
 ### Hard rejection
 
@@ -209,10 +225,17 @@ timestamps must be timezone-aware UTC values, and numeric limits must be positiv
 | `workload` | `document_extraction`, `cashflow_analysis`, `findings_correlation`, `opinion_drafting`, or `json_repair` |
 | `risk_level` | `low`, `medium`, `high`, or `critical` |
 | `data_classification` | `public`, `internal`, `confidential`, or `restricted` |
-| `context_tokens_estimated` | Integer greater than or equal to zero |
+| `context_tokens_estimated` | Integer greater than or equal to zero (input/prompt tokens) |
+| `max_output_tokens_estimated` | Integer greater than or equal to zero (expected output/completion tokens) |
 | `structured_output_required` | Boolean |
 | `max_latency_ms` | Positive integer |
 | `max_cost_usd` | Positive decimal value |
+
+`context_tokens_estimated` and `max_output_tokens_estimated` both feed the cost constraint: each
+model group is priced per token (input and output rates separately — see
+[Model-group profiles](#model-group-profiles)), so the estimated cost of a call is a function of
+its actual size, not a flat number per group. See
+[ADR-0010](docs/adr/0010-token-based-cost-estimation.md).
 
 Stable error codes are:
 
@@ -248,9 +271,11 @@ Other runtime settings:
 | `LOG_FORMAT` | `json` | Use `console` for human-readable local logs |
 | `API_KEYS` | *(required)* | JSON object mapping each `agent_name` to its own API key, checked against the `X-API-Key` header on `POST /route`; the service refuses to start if unset, empty, or malformed |
 | `RATE_LIMIT_MAX_REQUESTS` | `60` | Requests allowed per `(client IP, agent_name)` pair per window |
-| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window length, in seconds |
-| `RATE_LIMIT_MAX_TRACKED_KEYS` | `100000` | In-memory limiter only (ignored once `REDIS_URL` is set): caps distinct `(client IP, agent_name)` keys held in memory, evicting the least-recently-touched one past this limit |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window length, in seconds, shared by both tiers below |
+| `RATE_LIMIT_PER_IP_MAX_REQUESTS` | `600` | Requests allowed per client IP alone per window, checked before the per-agent tier and before authentication |
+| `RATE_LIMIT_MAX_TRACKED_KEYS` | `100000` | In-memory limiter only (ignored once `REDIS_URL` is set): caps distinct keys held in memory per tier, evicting the least-recently-touched one past this limit |
 | `REDIS_URL` | *(unset)* | Optional. Shares the rate limit across replicas via Redis (ADR-0008); requires `uv sync --extra rate-limit`. Unset keeps the default in-memory, per-process limiter |
+| `RATE_LIMIT_FINGERPRINT_SECRET` | *(unset)* | Redis-backed limiter only. HMAC key for the fail-open log fingerprint; unset uses a random per-process secret instead (stable per process, not across restarts) |
 
 ## Authentication and rate limiting
 
@@ -263,14 +288,22 @@ as this agent," or identity assurance stronger than "knew the right key" — see
 [ADR-0007's amendment](docs/adr/0007-http-boundary-hardening.md) for what a stronger mechanism
 (mTLS, OAuth2 client credentials) would add.
 
-It is also rate-limited per `(client IP, agent_name)` pair (`RATE_LIMIT_MAX_REQUESTS` per
-`RATE_LIMIT_WINDOW_SECONDS`); exceeding it returns `429 rate_limit_exceeded`. By default this is an
-in-memory, fixed-window counter, **per process**, bounded to `RATE_LIMIT_MAX_TRACKED_KEYS` distinct
-keys — a multi-instance deployment enforces the limit per instance, not cluster-wide (ADR-0007).
-Set `REDIS_URL` (and install `uv sync --extra rate-limit`) to share the limit across replicas
-instead; run `docker compose up -d redis` for a local instance. The Redis-backed limiter fails open
-on a backend error (it allows the request rather than blocking routing traffic on an unrelated
-outage) but fails the service closed at startup if the configured Redis is unreachable (ADR-0008).
+It is also rate-limited on two tiers, both checked *before* authentication so repeated
+invalid-API-key attempts are throttled too: a light per-client-IP tier
+(`RATE_LIMIT_PER_IP_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS`), then a per-`(IP, agent_name)`
+tier (`RATE_LIMIT_MAX_REQUESTS`) — the first tier exists specifically so a caller cannot dodge the
+second merely by varying the `agent_name` it sends on every request. Exceeding either tier returns
+`429 rate_limit_exceeded`. By default both are in-memory, fixed-window counters, **per process**,
+each bounded to `RATE_LIMIT_MAX_TRACKED_KEYS` distinct keys — a multi-instance deployment enforces
+the limit per instance, not cluster-wide (ADR-0007). Set `REDIS_URL` (and install
+`uv sync --extra rate-limit`) to share both tiers across replicas instead; run
+`docker compose up -d redis` for a local instance. The Redis-backed limiter fails open on a backend
+error (it allows the request rather than blocking routing traffic on an unrelated outage) but fails
+the service closed at startup if the configured Redis is unreachable (ADR-0008). Its fail-open log
+line never includes the raw key (which embeds the caller's IP) — only an HMAC-keyed fingerprint, so
+an operator can correlate repeated failures without an attacker with log access being able to
+enumerate and match the low-entropy `(IP, agent_name)` space against an unkeyed hash (see
+[ADR-0008's third amendment](docs/adr/0008-redis-shared-rate-limiter.md)).
 
 The rate-limit key's IP component is always the raw TCP peer address — this service never reads
 `X-Forwarded-For`/`Forwarded`. Behind a reverse proxy, every real client shares the proxy's IP,
@@ -294,15 +327,24 @@ routing use case or the domain constraints.
 
 `GET /health` always returns `200 {"status": "ok"}` once the process is serving requests. `GET
 /readyz` returns `200 {"status": "ready"}` once the routing policy loaded successfully at startup.
-`GET /metrics` returns Prometheus-format output, today limited to
-`policy_model_router_rate_limiter_backend_unavailable_total` — a counter incremented every time
-the Redis-backed rate limiter fails open because Redis was unreachable; alert on
-`increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (summed across
-replicas) to catch a sustained outage instead of relying on the `rate_limiter_backend_unavailable`
-log line alone. None of these three endpoints requires `X-API-Key` or counts against the rate
-limit, so orchestrators and scrapers can probe them cheaply. `/readyz` is a shallow check: this
-service has no external dependency to probe, so "ready" means "startup completed," not "a
-downstream system is healthy."
+`GET /metrics` returns Prometheus-format output (plus the default process/Python metrics the
+`prometheus_client` registry always exposes), including:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `policy_model_router_route_decisions_total` | Counter | `workload`, `model_group` | Successful routing decisions |
+| `policy_model_router_route_rejections_total` | Counter | `workload`, `outcome` | Requests that did not produce a decision (`no_viable_model_group`, `misconfigured_policy`) |
+| `policy_model_router_route_duration_seconds` | Histogram | `workload` | Time spent evaluating one routing decision |
+| `policy_model_router_rate_limit_decisions_total` | Counter | `tier` (`per_ip`, `per_agent`), `outcome` (`allowed`, `blocked`) | Rate limiter admit/block decisions |
+| `policy_model_router_rate_limiter_backend_unavailable_total` | Counter | — | Requests where the Redis-backed rate limiter failed open because Redis was unreachable |
+
+Alert on `increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (summed
+across replicas) to catch a sustained Redis outage instead of relying on the
+`rate_limiter_backend_unavailable` log line alone. None of the three endpoints in this section
+requires `X-API-Key` or counts against the rate limit, so orchestrators and scrapers can probe them
+cheaply. `/readyz` is a shallow check: it does not probe Redis even when `REDIS_URL` is configured,
+so "ready" means "startup completed, including a successful Redis connectivity check at that
+moment," not "Redis is healthy right now."
 
 None of the three is restricted at the network layer by this repository — that's an ingress/mesh
 concern, the same way deploying `/route` behind an authenticated gateway is. In production,
@@ -345,8 +387,10 @@ The policy is loaded once at startup, and request handling is stateless. See
 ([ADR-0004](docs/adr/0004-litellm-provider-boundary.md)), the routing algorithm
 ([ADR-0005](docs/adr/0005-deterministic-policy-routing.md)), the availability seam
 ([ADR-0006](docs/adr/0006-availability-provider-port.md)), the HTTP boundary hardening
-([ADR-0007](docs/adr/0007-http-boundary-hardening.md)), and the optional shared rate limiter
-([ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md)) look the way they do.
+([ADR-0007](docs/adr/0007-http-boundary-hardening.md)), the optional shared rate limiter
+([ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md)), decision provenance
+([ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md)), and token-based cost
+estimation ([ADR-0010](docs/adr/0010-token-based-cost-estimation.md)) look the way they do.
 
 ## Current scope
 

@@ -38,8 +38,10 @@ class RouteModelUseCase:
         clock: Clock,
         id_generator: IdGenerator,
         availability: AvailabilityProvider,
+        service_version: str,
+        environment: str,
     ) -> None:
-        """Bind the routing policy and the clock/id-generator/availability ports.
+        """Bind the routing policy, its ports, and the deployment identity attached to decisions.
 
         Args:
             policy: The declarative routing policy loaded for this environment.
@@ -47,13 +49,19 @@ class RouteModelUseCase:
             id_generator: Source of each decision's unique identifier.
             availability: Resolves each model group's effective availability at decision time; see
                 ADR-0006.
+            service_version: This service's own version, attached to every decision so it is
+                traceable to the code that produced it.
+            environment: The deployment environment (e.g. ``"production"``), attached to every
+                decision for the same reason.
         """
         self._policy = policy
         self._clock = clock
         self._id_generator = id_generator
         self._availability = availability
+        self._service_version = service_version
+        self._environment = environment
 
-    def route(self, request: RouteRequest) -> RouteDecision:
+    async def route(self, request: RouteRequest) -> RouteDecision:
         """Return the routing decision for one request, or raise if none can be reached."""
         try:
             workload_rule = self._policy.workloads[request.workload]
@@ -66,7 +74,7 @@ class RouteModelUseCase:
         for model_group, profile in self._policy.model_groups.items():
             effective_profile = replace(
                 profile,
-                available=self._availability.is_available(model_group, profile.available),
+                available=await self._availability.is_available(model_group, profile.available),
             )
             for constraint in CONSTRAINTS:
                 reason = constraint(request, effective_profile, workload_rule)
@@ -103,4 +111,9 @@ class RouteModelUseCase:
                 f"{selected.value!r} and satisfies all constraints"
             ),
             rejected_candidates=rejected_candidates,
+            policy_id=self._policy.policy_id,
+            policy_version=self._policy.policy_version,
+            policy_digest=self._policy.policy_digest,
+            service_version=self._service_version,
+            environment=self._environment,
         )
