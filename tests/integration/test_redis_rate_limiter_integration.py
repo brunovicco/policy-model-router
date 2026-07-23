@@ -65,3 +65,22 @@ async def test_ping_succeeds_against_real_redis(redis_client: Any) -> None:
     limiter = RedisRateLimiter(redis_client, max_requests=1, window_seconds=30)
 
     await limiter.ping()
+
+
+@pytest.mark.anyio
+async def test_allow_repairs_a_ttl_lost_between_incr_and_expire(redis_client: Any) -> None:
+    """Regression test: a crash-like gap between INCR and EXPIRE must not strand the key.
+
+    Simulates the crash by incrementing the counter directly, bypassing the atomic script, so the
+    key exists with hits but no TTL - the exact state a process crash between INCR and EXPIRE used
+    to leave behind. The next ``allow()`` call must detect and repair the missing TTL.
+    """
+    key = f"test:{uuid.uuid4()}"
+    limiter = RedisRateLimiter(redis_client, max_requests=5, window_seconds=30)
+    full_key = f"policy-model-router:rate-limit:{key}"
+    await redis_client.incr(full_key)
+    assert await redis_client.ttl(full_key) == -1
+
+    await limiter.allow(key)
+
+    assert await redis_client.ttl(full_key) > 0

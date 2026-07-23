@@ -30,6 +30,8 @@ class ModelGroupProfile:
 
     Attributes:
         allowed_agents: Agent names allowed to use this group; empty means no restriction.
+        input_cost_usd_per_million_tokens: Price of input/prompt tokens, per million tokens.
+        output_cost_usd_per_million_tokens: Price of output/completion tokens, per million tokens.
     """
 
     authorized_data_classifications: frozenset[DataClassification]
@@ -38,9 +40,18 @@ class ModelGroupProfile:
     supports_tool_calling: bool
     max_context_tokens: int
     typical_latency_ms: int
-    estimated_cost_usd: Decimal
+    input_cost_usd_per_million_tokens: Decimal
+    output_cost_usd_per_million_tokens: Decimal
     available: bool
     allowed_agents: frozenset[str]
+
+    def estimated_cost(self, *, input_tokens: int, output_tokens: int) -> Decimal:
+        """Return the estimated USD cost of a call with the given input/output token counts."""
+        million = Decimal(1_000_000)
+        return (
+            Decimal(input_tokens) * self.input_cost_usd_per_million_tokens / million
+            + Decimal(output_tokens) * self.output_cost_usd_per_million_tokens / million
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +64,19 @@ class WorkloadRule:
 
 @dataclass(frozen=True, slots=True)
 class RoutingPolicy:
-    """The full declarative routing policy: model-group catalog plus the workload table."""
+    """The full declarative routing policy: model-group catalog plus the workload table.
+
+    ``policy_id``/``policy_version`` are declared in the YAML file itself and identify *which*
+    policy is loaded; ``policy_digest`` is computed by the loader from the raw file bytes
+    (``sha256:<hex>``) and identifies *exactly what content* was loaded, independent of whether
+    the author remembered to bump ``policy_version``. Both travel into every
+    :class:`~policy_model_router.domain.routing.RouteDecision` so a decision is traceable back to
+    the policy that produced it.
+    """
 
     schema_version: str
+    policy_id: str
+    policy_version: str
+    policy_digest: str
     model_groups: Mapping[ModelGroup, ModelGroupProfile]
     workloads: Mapping[Workload, WorkloadRule]

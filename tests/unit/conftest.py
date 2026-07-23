@@ -39,6 +39,7 @@ def make_request() -> Callable[..., RouteRequest]:
             "risk_level": RiskLevel.MEDIUM,
             "data_classification": DataClassification.INTERNAL,
             "context_tokens_estimated": 1_000,
+            "max_output_tokens_estimated": 500,
             "structured_output_required": False,
             "max_latency_ms": 10_000,
             "max_cost_usd": Decimal("1.00"),
@@ -61,7 +62,8 @@ def make_profile() -> Callable[..., ModelGroupProfile]:
             "supports_tool_calling": True,
             "max_context_tokens": 100_000,
             "typical_latency_ms": 1_000,
-            "estimated_cost_usd": Decimal("0.01"),
+            "input_cost_usd_per_million_tokens": Decimal("0.10"),
+            "output_cost_usd_per_million_tokens": Decimal("0.40"),
             "available": True,
             "allowed_agents": frozenset(),
         }

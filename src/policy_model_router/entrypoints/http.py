@@ -2,14 +2,18 @@
 
 The model-routing decision endpoint agents call over HTTP before every LLM call. Per ADR-0004,
 this service is infrastructure, not an A2A agent: agents call it directly, it is not discovered
-through Agent Cards or the A2A protocol. Per ADR-0007 (amended), ``/route`` requires a per-agent
-API key and is rate-limited per (client IP, agent) pair; ``/health``, ``/readyz``, and ``/metrics``
-are unauthenticated and unthrottled so orchestrators and scrapers can probe them cheaply.
+through Agent Cards or the A2A protocol. Per ADR-0007 (amended) and ADR-0008's second amendment,
+``/route`` requires a per-agent API key and is rate-limited on two tiers - a light per-client-IP
+tier, then a per-(IP, agent) tier - before authentication, so repeated invalid-API-key attempts
+are throttled too, and an attacker cannot bypass the per-agent tier merely by varying the claimed
+``agent_name``. ``/health``, ``/readyz``, and ``/metrics`` are unauthenticated and unthrottled so
+orchestrators and scrapers can probe them cheaply.
 """
 
 import json
 import os
 import secrets
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
@@ -19,7 +23,7 @@ from typing import Annotated, Protocol
 from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from policy_model_router.adapters.availability import StaticAvailabilityProvider
 from policy_model_router.adapters.clock import SystemClock
@@ -45,6 +49,28 @@ _DEFAULT_ROUTING_POLICY_PATH = "config/routing_policy.yaml"
 _DEFAULT_RATE_LIMIT_MAX_REQUESTS = 60
 _DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60.0
 _DEFAULT_RATE_LIMIT_MAX_TRACKED_KEYS = 100_000
+_DEFAULT_RATE_LIMIT_PER_IP_MAX_REQUESTS = 600
+
+ROUTE_DECISIONS_TOTAL = Counter(
+    "policy_model_router_route_decisions_total",
+    "Successful routing decisions, labeled by workload and the selected model group.",
+    ["workload", "model_group"],
+)
+ROUTE_REJECTIONS_TOTAL = Counter(
+    "policy_model_router_route_rejections_total",
+    "Routing requests that did not produce a decision, labeled by workload and outcome.",
+    ["workload", "outcome"],
+)
+ROUTE_DURATION_SECONDS = Histogram(
+    "policy_model_router_route_duration_seconds",
+    "Time spent evaluating one routing decision (RouteModelUseCase.route only), by workload.",
+    ["workload"],
+)
+RATE_LIMIT_DECISIONS_TOTAL = Counter(
+    "policy_model_router_rate_limit_decisions_total",
+    "Rate limiter admit/block decisions, labeled by tier (per_ip, per_agent) and outcome.",
+    ["tier", "outcome"],
+)
 
 
 class RateLimiter(Protocol):
@@ -115,7 +141,21 @@ def _required_api_keys() -> dict[str, str]:
     return parsed
 
 
-def _build_rate_limiter(*, max_requests: int, window_seconds: float) -> RateLimiter:
+def _fingerprint_secret() -> bytes | None:
+    """Return the configured rate-limiter fingerprint HMAC secret, or ``None`` for an ephemeral one.
+
+    Unset by default: ``RedisRateLimiter`` then falls back to a random, process-local secret,
+    which still defeats offline enumeration of the low-entropy ``(IP, agent_name)`` key space from
+    log access alone, but does not stay stable across restarts. Set the env var to keep
+    fingerprints stable across restarts for longer-lived log correlation; treat it as a secret.
+    """
+    raw = os.environ.get("RATE_LIMIT_FINGERPRINT_SECRET")
+    return raw.encode() if raw else None
+
+
+def _build_rate_limiter(
+    *, max_requests: int, window_seconds: float, fingerprint_secret: bytes | None = None
+) -> RateLimiter:
     """Build the configured rate limiter.
 
     Redis-backed and shared across replicas if ``REDIS_URL`` is set (ADR-0008); otherwise the
@@ -143,43 +183,63 @@ def _build_rate_limiter(*, max_requests: int, window_seconds: float) -> RateLimi
         ) from exc
 
     client = Redis.from_url(redis_url, socket_connect_timeout=2.0, socket_timeout=2.0)
-    return RedisRateLimiter(client, max_requests=max_requests, window_seconds=window_seconds)
+    return RedisRateLimiter(
+        client,
+        max_requests=max_requests,
+        window_seconds=window_seconds,
+        fingerprint_secret=fingerprint_secret,
+    )
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Configure logging and load the routing policy, API keys, and rate limiter at startup.
+    """Configure logging and load the routing policy, API keys, and rate limiters at startup.
 
-    Fails fast if the routing policy is missing/invalid, the API keys are not configured, or the
-    rate limiter's backend (when Redis-backed) is not reachable.
+    Fails fast if the routing policy is missing/invalid, the API keys are not configured, or
+    either rate limiter's backend (when Redis-backed) is not reachable.
     """
-    configure_logging(
-        service=_SERVICE_NAME,
-        environment=os.environ.get("APP_ENV", "development"),
-        version=_service_version(),
-    )
+    environment = os.environ.get("APP_ENV", "development")
+    service_version = _service_version()
+    configure_logging(service=_SERVICE_NAME, environment=environment, version=service_version)
+
     policy = load_routing_policy(_routing_policy_path())
     app.state.route_model_use_case = RouteModelUseCase(
         policy,
         clock=SystemClock(),
         id_generator=Uuid4IdGenerator(),
         availability=StaticAvailabilityProvider(),
+        service_version=service_version,
+        environment=environment,
     )
     app.state.api_keys = _required_api_keys()
 
+    fingerprint_secret = _fingerprint_secret()
+    window_seconds = float(
+        os.environ.get("RATE_LIMIT_WINDOW_SECONDS", _DEFAULT_RATE_LIMIT_WINDOW_SECONDS)
+    )
     rate_limiter = _build_rate_limiter(
         max_requests=int(
             os.environ.get("RATE_LIMIT_MAX_REQUESTS", _DEFAULT_RATE_LIMIT_MAX_REQUESTS)
         ),
-        window_seconds=float(
-            os.environ.get("RATE_LIMIT_WINDOW_SECONDS", _DEFAULT_RATE_LIMIT_WINDOW_SECONDS)
+        window_seconds=window_seconds,
+        fingerprint_secret=fingerprint_secret,
+    )
+    ip_rate_limiter = _build_rate_limiter(
+        max_requests=int(
+            os.environ.get(
+                "RATE_LIMIT_PER_IP_MAX_REQUESTS", _DEFAULT_RATE_LIMIT_PER_IP_MAX_REQUESTS
+            )
         ),
+        window_seconds=window_seconds,
+        fingerprint_secret=fingerprint_secret,
     )
     try:
         await rate_limiter.ping()
+        await ip_rate_limiter.ping()
     except Exception as exc:
         raise RuntimeError(f"rate limiter backend is not reachable: {exc}") from exc
     app.state.rate_limiter = rate_limiter
+    app.state.ip_rate_limiter = ip_rate_limiter
 
     yield
 
@@ -295,12 +355,39 @@ async def route(
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> ModelRouteDecision:
     """Evaluate one model-routing request and return the resulting decision record."""
-    _authenticate(x_api_key, request.agent_name, http_request.app.state.api_keys)
-
     client_host = http_request.client.host if http_request.client else "unknown"
+
+    ip_allowed = await http_request.app.state.ip_rate_limiter.allow(f"ip:{client_host}")
+    RATE_LIMIT_DECISIONS_TOTAL.labels(
+        tier="per_ip", outcome="allowed" if ip_allowed else "blocked"
+    ).inc()
+    if not ip_allowed:
+        raise RateLimitExceededError(f"rate limit exceeded for client {client_host!r}")
+
     rate_limit_key = f"{client_host}:{request.agent_name}"
-    if not await http_request.app.state.rate_limiter.allow(rate_limit_key):
+    agent_allowed = await http_request.app.state.rate_limiter.allow(rate_limit_key)
+    RATE_LIMIT_DECISIONS_TOTAL.labels(
+        tier="per_agent", outcome="allowed" if agent_allowed else "blocked"
+    ).inc()
+    if not agent_allowed:
         raise RateLimitExceededError(f"rate limit exceeded for {rate_limit_key!r}")
 
-    decision = use_case.route(to_domain_request(request))
+    _authenticate(x_api_key, request.agent_name, http_request.app.state.api_keys)
+
+    workload = request.workload.value
+    started_at = time.monotonic()
+    try:
+        decision = await use_case.route(to_domain_request(request))
+    except NoViableModelGroupError:
+        ROUTE_REJECTIONS_TOTAL.labels(workload=workload, outcome="no_viable_model_group").inc()
+        raise
+    except IncompleteRoutingPolicyError:
+        ROUTE_REJECTIONS_TOTAL.labels(workload=workload, outcome="misconfigured_policy").inc()
+        raise
+    finally:
+        ROUTE_DURATION_SECONDS.labels(workload=workload).observe(time.monotonic() - started_at)
+
+    ROUTE_DECISIONS_TOTAL.labels(
+        workload=workload, model_group=decision.selected_model_group.value
+    ).inc()
     return from_domain_decision(decision)

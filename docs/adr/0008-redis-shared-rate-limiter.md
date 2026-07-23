@@ -157,3 +157,52 @@ reverse proxy and wants real per-client granularity must configure the proxy to 
 header and configure Uvicorn/Starlette to trust only that specific hop (e.g. `--forwarded-allow-ips`
 scoped to the proxy's own address) - never trust forwarded headers from an unrestricted set of
 peers.
+
+## Amendment (2026-07-22, third): a per-IP tier, a keyed fingerprint, and Docker shipping the extra
+
+A follow-up review of the merged PR raised three further items, all fixed here.
+
+**Fixed: the Docker image did not ship the `redis` package at all.** `Dockerfile`'s two `uv sync`
+stages ran `--no-dev` without `--extra rate-limit`, so the *built and published* image lacked the
+`redis` client entirely - setting `REDIS_URL` on that image made `_build_rate_limiter` raise at
+startup (`ImportError` caught and re-raised as `RuntimeError`), even though this ADR documents
+Redis as an opt-in, supported capability. Both `uv sync` invocations now pass `--extra rate-limit`,
+so the shipped image actually supports what it claims to.
+
+**Fixed: an attacker could bypass the per-`(IP, agent_name)` limit by varying `agent_name`.** The
+existing tier only ever throttles a fixed `(IP, agent_name)` pair; a caller willing to send a
+different (even nonexistent) `agent_name` on every request gets a fresh counter every time,
+regardless of whether that agent is ever configured. `entrypoints/http.py`'s `route` handler now
+checks a second, lighter tier first - `ip_rate_limiter`, keyed on `f"ip:{client_host}"` alone, via
+`RATE_LIMIT_PER_IP_MAX_REQUESTS` (default 600, sharing `RATE_LIMIT_WINDOW_SECONDS`) - before the
+existing per-agent tier and before authentication. `_lifespan` builds both limiters through the
+same `_build_rate_limiter` factory (so both honor `REDIS_URL`/the in-memory fallback identically)
+and `ping()`s both at startup. The two tiers are separate limiter instances with distinct key
+shapes (`"ip:{client_host}"` vs. `"{client_host}:{agent_name}"`), so they cannot collide even when
+sharing one Redis keyspace. `GET /metrics` now exposes
+`policy_model_router_rate_limit_decisions_total{tier,outcome}` so both tiers' admit/block counts
+are directly observable.
+
+**Fixed: the fail-open fingerprint was an unkeyed hash, not a keyed one.** `_fingerprint` used
+`hashlib.sha256(key).hexdigest()[:12]` with no secret. Because the `(IP, agent_name)` key space is
+low-entropy - a small, guessable set of agent names crossed with a plausible IP range - an attacker
+with only log access (never the raw key, which is never logged) could still enumerate candidate
+keys offline and match them against a logged fingerprint, defeating the intent of not logging the
+raw key. `RedisRateLimiter` now computes `hmac.new(secret, key, hashlib.sha256)` instead. The
+secret is optional and defaults to a random 32-byte value generated once per instance
+(`secrets.token_bytes(32)`) if `RATE_LIMIT_FINGERPRINT_SECRET` is not set - not stable across
+restarts, but unknowable from log access alone, which is the actual property this fingerprint
+needs. Operators that want fingerprints to stay stable across restarts (for longer-lived log
+correlation) can set that env var explicitly; `entrypoints/http.py::_fingerprint_secret` reads it
+once at startup and threads the same secret into both rate-limit tiers.
+
+**Consequences of this amendment.** The Docker fix is purely additive (a larger image, one more
+installed package) with no behavior change for deployments that never set `REDIS_URL`. The per-IP
+tier adds a second Redis round trip (or a second in-memory dict lookup) per `/route` request and
+one more required env var default to reason about; a legitimate deployment with many distinct
+agents behind one IP (e.g. a shared gateway) must size `RATE_LIMIT_PER_IP_MAX_REQUESTS` accordingly
+- the default (600/window) is deliberately generous relative to the per-agent default (60/window)
+for that reason. The fingerprint secret defaulting to a random per-process value means fingerprints
+for the same caller will differ across a restart or across replicas that don't share
+`RATE_LIMIT_FINGERPRINT_SECRET` - acceptable, since the fingerprint's job is same-process
+correlation during an outage, not a durable per-caller identifier.

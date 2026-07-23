@@ -1,6 +1,6 @@
 """Unit tests for the Redis-backed rate limiter's own logic.
 
-Uses a small in-process fake client (``incr``/``expire``/``ping``) rather than the real ``redis``
+Uses a small in-process fake client (``eval``/``ping``) rather than the real ``redis``
 package, per ``.claude/rules/testing.md`` ("Unit tests isolate ... external filesystems") - there
 is no live Redis in this test run, and this class is fully duck-typed so it doesn't need one to
 verify its counting and fail-open behavior.
@@ -10,6 +10,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from policy_model_router.adapters.redis_rate_limiter import (
+    _KEY_PREFIX,
     BACKEND_UNAVAILABLE_TOTAL,
     RedisRateLimiter,
 )
@@ -23,35 +24,41 @@ def _counter_value() -> float:
 
 
 class _FakeRedisClient:
-    """Minimal in-process stand-in for ``redis.asyncio.Redis``: ``incr``/``expire``/``ping``."""
+    """Minimal in-process stand-in for ``redis.asyncio.Redis``: ``eval``/``ping``.
+
+    Emulates the ``INCR`` + conditional ``EXPIRE`` semantics of ``_INCR_AND_EXPIRE_SCRIPT`` in
+    Python rather than a real Lua interpreter; the real script is exercised end-to-end against a
+    live Redis by ``tests/integration/test_redis_rate_limiter_integration.py``.
+    """
 
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
         self.expirations: dict[str, int] = {}
+        self._has_ttl: set[str] = set()
 
-    async def incr(self, key: str) -> int:
-        """Increment and return the counter for ``key``, starting at 1."""
+    async def eval(self, _script: str, _numkeys: int, key: str, window_seconds: int) -> int:
+        """Increment ``key`` and set its TTL if this is the first hit or the TTL is missing."""
         self.counts[key] = self.counts.get(key, 0) + 1
+        if key not in self._has_ttl:
+            self.expirations[key] = window_seconds
+            self._has_ttl.add(key)
         return self.counts[key]
-
-    async def expire(self, key: str, seconds: int) -> None:
-        """Record the TTL that would have been set for ``key``."""
-        self.expirations[key] = seconds
 
     async def ping(self) -> None:
         """Succeed unconditionally; failure is simulated by a different fake below."""
         return
 
+    def drop_ttl(self, key: str) -> None:
+        """Simulate a crash between INCR and EXPIRE by forgetting ``key``'s TTL bookkeeping."""
+        self.expirations.pop(key, None)
+        self._has_ttl.discard(key)
+
 
 class _FailingClient:
     """Fake client whose every method raises, to exercise the fail-open path."""
 
-    async def incr(self, _key: str) -> int:
+    async def eval(self, _script: str, _numkeys: int, _key: str, _window_seconds: int) -> int:
         """Always raise, simulating a Redis connectivity error."""
-        raise ConnectionError("redis unreachable")
-
-    async def expire(self, _key: str, _seconds: int) -> None:
-        """Always raise; unreachable in practice since ``incr`` raises first."""
         raise ConnectionError("redis unreachable")
 
     async def ping(self) -> None:
@@ -100,6 +107,21 @@ async def test_sets_expiry_only_on_the_first_request_of_a_window() -> None:
 
 
 @pytest.mark.anyio
+async def test_repairs_a_missing_ttl_on_a_key_that_already_has_hits() -> None:
+    """A crash between INCR and EXPIRE must not leave a key permanently without a TTL."""
+    client = _FakeRedisClient()
+    limiter = RedisRateLimiter(client, max_requests=5, window_seconds=42)
+    full_key = f"{_KEY_PREFIX}:key"
+
+    await limiter.allow("key")
+    client.drop_ttl(full_key)
+
+    await limiter.allow("key")
+
+    assert client.expirations[full_key] == 42
+
+
+@pytest.mark.anyio
 async def test_allow_fails_open_when_the_backend_is_unavailable() -> None:
     limiter = RedisRateLimiter(_FailingClient(), max_requests=1, window_seconds=60)
 
@@ -131,6 +153,59 @@ async def test_allow_never_logs_the_raw_key_on_failure() -> None:
     assert "key" not in logs[0]
     assert raw_key not in repr(logs[0])
     assert logs[0]["key_fingerprint"] != raw_key
+
+
+@pytest.mark.anyio
+async def test_fingerprint_is_stable_for_a_fixed_configured_secret() -> None:
+    """A configured secret makes the fingerprint reproducible across limiter instances."""
+    raw_key = "203.0.113.5:credit-analysis-agent"
+    limiter_a = RedisRateLimiter(
+        _FailingClient(), max_requests=1, window_seconds=60, fingerprint_secret=b"shared-secret"
+    )
+    limiter_b = RedisRateLimiter(
+        _FailingClient(), max_requests=1, window_seconds=60, fingerprint_secret=b"shared-secret"
+    )
+
+    with capture_logs() as logs_a:
+        await limiter_a.allow(raw_key)
+    with capture_logs() as logs_b:
+        await limiter_b.allow(raw_key)
+
+    assert logs_a[0]["key_fingerprint"] == logs_b[0]["key_fingerprint"]
+
+
+@pytest.mark.anyio
+async def test_fingerprint_differs_between_different_configured_secrets() -> None:
+    """Without a shared secret, an attacker with only log access cannot match fingerprints."""
+    raw_key = "203.0.113.5:credit-analysis-agent"
+    limiter_a = RedisRateLimiter(
+        _FailingClient(), max_requests=1, window_seconds=60, fingerprint_secret=b"secret-a"
+    )
+    limiter_b = RedisRateLimiter(
+        _FailingClient(), max_requests=1, window_seconds=60, fingerprint_secret=b"secret-b"
+    )
+
+    with capture_logs() as logs_a:
+        await limiter_a.allow(raw_key)
+    with capture_logs() as logs_b:
+        await limiter_b.allow(raw_key)
+
+    assert logs_a[0]["key_fingerprint"] != logs_b[0]["key_fingerprint"]
+
+
+@pytest.mark.anyio
+async def test_fingerprint_defaults_to_a_random_secret_when_none_is_configured() -> None:
+    """Two limiter instances with no configured secret must not produce matching fingerprints."""
+    raw_key = "203.0.113.5:credit-analysis-agent"
+    limiter_a = RedisRateLimiter(_FailingClient(), max_requests=1, window_seconds=60)
+    limiter_b = RedisRateLimiter(_FailingClient(), max_requests=1, window_seconds=60)
+
+    with capture_logs() as logs_a:
+        await limiter_a.allow(raw_key)
+    with capture_logs() as logs_b:
+        await limiter_b.allow(raw_key)
+
+    assert logs_a[0]["key_fingerprint"] != logs_b[0]["key_fingerprint"]
 
 
 @pytest.mark.anyio

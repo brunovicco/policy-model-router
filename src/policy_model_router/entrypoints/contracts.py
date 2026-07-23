@@ -1,11 +1,16 @@
 """External wire contract for model-routing requests and decisions.
 
-Mirrors ``credit_desk_contracts.routing`` / ``credit_desk_contracts.enums`` from the
+Originally mirrored ``credit_desk_contracts.routing`` / ``credit_desk_contracts.enums`` from the
 ``multi-agent-credit-desk`` monorepo field-for-field, including the ``StrictContract`` base
 (``extra="forbid"``, immutable, strict) and the UTC-only datetime validator - but this repo does
-not depend on that monorepo (separate repository, no shared package). Entrypoints validate
-external input against these schemas and translate it into the framework-free domain types in
-:mod:`policy_model_router.domain.routing` before calling the application use case.
+not depend on that monorepo (separate repository, no shared package, no automated contract test
+between them). ``max_output_tokens_estimated`` on the request and the ``policy_id``/
+``policy_version``/``policy_digest``/``service_version``/``environment`` fields on the response are
+a deliberate, documented divergence from that mirror (added for token-based cost estimation and
+decision auditability, respectively): ``credit_desk_contracts`` needs updating to match before any
+consumer there can rely on them. Entrypoints validate external input against these schemas and
+translate it into the framework-free domain types in :mod:`policy_model_router.domain.routing`
+before calling the application use case.
 """
 
 from datetime import datetime, timedelta
@@ -55,6 +60,7 @@ class ModelRouteRequest(StrictContract):
     risk_level: RiskLevel
     data_classification: DataClassification
     context_tokens_estimated: Annotated[int, Field(ge=0)]
+    max_output_tokens_estimated: Annotated[int, Field(ge=0)]
     structured_output_required: bool
     max_latency_ms: Annotated[int, Field(gt=0)]
     max_cost_usd: Annotated[Decimal, Field(gt=0)]
@@ -78,6 +84,11 @@ class ModelRouteDecision(StrictContract):
     selected_model_group: ModelGroup
     reason: _NonEmptyStr
     rejected_candidates: tuple[RejectedCandidate, ...]
+    policy_id: _NonEmptyStr
+    policy_version: _NonEmptyStr
+    policy_digest: _NonEmptyStr
+    service_version: _NonEmptyStr
+    environment: _NonEmptyStr
 
 
 def to_domain_request(request: ModelRouteRequest) -> DomainRouteRequest:
@@ -92,6 +103,7 @@ def to_domain_request(request: ModelRouteRequest) -> DomainRouteRequest:
         risk_level=request.risk_level,
         data_classification=request.data_classification,
         context_tokens_estimated=request.context_tokens_estimated,
+        max_output_tokens_estimated=request.max_output_tokens_estimated,
         structured_output_required=request.structured_output_required,
         max_latency_ms=request.max_latency_ms,
         max_cost_usd=request.max_cost_usd,
@@ -112,6 +124,11 @@ def from_domain_decision(decision: DomainRouteDecision) -> ModelRouteDecision:
             RejectedCandidate(model_group=candidate.model_group, reason=candidate.reason)
             for candidate in decision.rejected_candidates
         ),
+        policy_id=decision.policy_id,
+        policy_version=decision.policy_version,
+        policy_digest=decision.policy_digest,
+        service_version=decision.service_version,
+        environment=decision.environment,
     )
 
 

@@ -70,3 +70,17 @@ def test_build_rate_limiter_returns_redis_backed_limiter_when_configured(
     limiter = _build_rate_limiter(max_requests=10, window_seconds=60)
 
     assert isinstance(limiter, RedisRateLimiter)
+
+
+def test_build_rate_limiter_threads_the_fingerprint_secret_into_the_redis_limiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_redis(monkeypatch)
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+
+    limiter = _build_rate_limiter(
+        max_requests=10, window_seconds=60, fingerprint_secret=b"configured-secret"
+    )
+
+    assert isinstance(limiter, RedisRateLimiter)
+    assert limiter._fingerprint_secret == b"configured-secret"

@@ -19,6 +19,8 @@ _SHIPPED_POLICY_PATH = Path(__file__).resolve().parents[2] / "config" / "routing
 
 _VALID_YAML = """
 schema_version: "1.0"
+policy_id: "test-policy"
+policy_version: "1.0.0"
 model_groups:
   fast-small:
     authorized_data_classifications: [public]
@@ -27,7 +29,8 @@ model_groups:
     supports_tool_calling: true
     max_context_tokens: 1000
     typical_latency_ms: 1000
-    estimated_cost_usd: "0.01"
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
     available: true
     allowed_agents: []
   reasoning-medium:
@@ -37,7 +40,8 @@ model_groups:
     supports_tool_calling: true
     max_context_tokens: 1000
     typical_latency_ms: 1000
-    estimated_cost_usd: "0.01"
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
     available: true
     allowed_agents: []
   reasoning-strong:
@@ -47,7 +51,8 @@ model_groups:
     supports_tool_calling: true
     max_context_tokens: 1000
     typical_latency_ms: 1000
-    estimated_cost_usd: "0.01"
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
     available: true
     allowed_agents: []
   fast-structured-output:
@@ -57,7 +62,8 @@ model_groups:
     supports_tool_calling: false
     max_context_tokens: 1000
     typical_latency_ms: 1000
-    estimated_cost_usd: "0.01"
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
     available: true
     allowed_agents: []
 workloads:
@@ -73,10 +79,37 @@ def test_load_routing_policy_reads_the_shipped_config() -> None:
     policy = load_routing_policy(_SHIPPED_POLICY_PATH)
 
     assert policy.schema_version == "1.0"
+    assert policy.policy_id
+    assert policy.policy_version
+    assert policy.policy_digest.startswith("sha256:")
     assert set(policy.model_groups) == set(ModelGroup)
     assert set(policy.workloads) == set(Workload)
     assert policy.workloads[Workload.DOCUMENT_EXTRACTION].model_group == ModelGroup.FAST_SMALL
     assert policy.workloads[Workload.JSON_REPAIR].model_group == ModelGroup.FAST_STRUCTURED_OUTPUT
+
+
+def test_load_routing_policy_computes_a_digest_that_changes_with_the_file_content(
+    tmp_path: Path,
+) -> None:
+    policy_path = tmp_path / "routing_policy.yaml"
+    policy_path.write_text(_VALID_YAML, encoding="utf-8")
+    first_digest = load_routing_policy(policy_path).policy_digest
+
+    policy_path.write_text(
+        _VALID_YAML.replace('policy_version: "1.0.0"', 'policy_version: "2.0.0"')
+    )
+    second_digest = load_routing_policy(policy_path).policy_digest
+
+    assert first_digest != second_digest
+
+
+def test_load_routing_policy_fails_closed_when_policy_id_is_missing(tmp_path: Path) -> None:
+    incomplete = _VALID_YAML.replace('policy_id: "test-policy"\n', "")
+    policy_path = tmp_path / "routing_policy.yaml"
+    policy_path.write_text(incomplete, encoding="utf-8")
+
+    with pytest.raises(RoutingPolicyLoadError):
+        load_routing_policy(policy_path)
 
 
 def test_load_routing_policy_parses_a_minimal_valid_file(tmp_path: Path) -> None:
@@ -120,7 +153,8 @@ def test_load_routing_policy_fails_closed_when_a_model_group_is_missing(tmp_path
     supports_tool_calling: false
     max_context_tokens: 1000
     typical_latency_ms: 1000
-    estimated_cost_usd: "0.01"
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
     available: true
     allowed_agents: []
 """,

@@ -159,8 +159,15 @@ def test_context_window_rejects_when_exceeded(
 def test_max_cost_passes_when_within_ceiling(
     make_request: MakeRequest, make_profile: MakeProfile, make_rule: MakeRule
 ) -> None:
-    request = make_request(max_cost_usd=Decimal("0.10"))
-    profile = make_profile(estimated_cost_usd=Decimal("0.10"))
+    request = make_request(
+        max_cost_usd=Decimal("0.10"),
+        context_tokens_estimated=1_000_000,
+        max_output_tokens_estimated=0,
+    )
+    profile = make_profile(
+        input_cost_usd_per_million_tokens=Decimal("0.10"),
+        output_cost_usd_per_million_tokens=Decimal("0.00"),
+    )
 
     assert check_max_cost(request, profile, make_rule()) is None
 
@@ -168,8 +175,15 @@ def test_max_cost_passes_when_within_ceiling(
 def test_max_cost_rejects_when_exceeding_ceiling(
     make_request: MakeRequest, make_profile: MakeProfile, make_rule: MakeRule
 ) -> None:
-    request = make_request(max_cost_usd=Decimal("0.10"))
-    profile = make_profile(estimated_cost_usd=Decimal("0.11"))
+    request = make_request(
+        max_cost_usd=Decimal("0.10"),
+        context_tokens_estimated=1_100_000,
+        max_output_tokens_estimated=0,
+    )
+    profile = make_profile(
+        input_cost_usd_per_million_tokens=Decimal("0.10"),
+        output_cost_usd_per_million_tokens=Decimal("0.00"),
+    )
 
     assert check_max_cost(request, profile, make_rule()) is not None
 
