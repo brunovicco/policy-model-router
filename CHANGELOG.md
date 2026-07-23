@@ -1,10 +1,15 @@
 # Changelog
 
 All notable changes to this project are documented in this file. Format based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). No version has been tagged yet; entries
-so far are grouped under Unreleased.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+A `v0.1.0` git tag exists from early Docker/GHCR-publishing scaffolding work, predating the
+feature set below; it has no corresponding GitHub Release and was never treated as a real release
+of this service. `0.2.0` is the first version that reflects what the service actually does.
 
 ## Unreleased
+
+## [0.2.0] - 2026-07-23
 
 ### Added
 
