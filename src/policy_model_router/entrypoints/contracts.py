@@ -40,6 +40,10 @@ def _require_utc(value: datetime) -> datetime:
 
 UtcDatetime = Annotated[datetime, AfterValidator(_require_utc)]
 _NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
+# Caller-supplied identifiers (workflow_id/task_id/agent_name): bounded, unlike _NonEmptyStr,
+# which stays unbounded for response-side fields (policy_digest, reason, ...) where a length cap
+# doesn't make sense.
+_BoundedIdentifier = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 
 
 class StrictContract(BaseModel):
@@ -60,14 +64,14 @@ class ModelRouteRequest(StrictContract):
 
     schema_version: Literal["1.0"]
     requested_at: UtcDatetime
-    workflow_id: _NonEmptyStr
-    task_id: _NonEmptyStr
-    agent_name: _NonEmptyStr
+    workflow_id: _BoundedIdentifier
+    task_id: _BoundedIdentifier
+    agent_name: _BoundedIdentifier
     workload: Workload
     risk_level: RiskLevel
     data_classification: DataClassification
-    context_tokens_estimated: Annotated[int, Field(ge=0)]
-    max_output_tokens_estimated: Annotated[int, Field(ge=0)]
+    context_tokens_estimated: Annotated[int, Field(ge=0, le=10_000_000)]
+    max_output_tokens_estimated: Annotated[int, Field(ge=0, le=10_000_000)]
     structured_output_required: bool
     max_latency_ms: Annotated[int, Field(gt=0)]
     max_cost_usd: Annotated[Decimal, Field(gt=0)]

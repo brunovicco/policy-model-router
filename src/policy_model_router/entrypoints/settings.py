@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     rate_limit_fingerprint_secret: str | None = Field(default=None)
     redis_url: str | None = Field(default=None)
     enable_api_docs: bool = Field(default=False)
+    max_request_body_bytes: int = Field(default=16_384, gt=0)
 
     @field_validator("redis_url", "rate_limit_fingerprint_secret", mode="before")
     @classmethod

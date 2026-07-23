@@ -29,6 +29,7 @@ from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from policy_model_router.adapters.availability import StaticAvailabilityProvider
 from policy_model_router.adapters.clock import SystemClock
@@ -56,6 +57,7 @@ from policy_model_router.entrypoints.logging import (
 from policy_model_router.entrypoints.settings import Settings
 
 _SERVICE_NAME = "policy-model-router"
+_MAX_CORRELATION_ID_LENGTH = 200
 
 ROUTE_DECISIONS_TOTAL = Counter(
     "policy_model_router_route_decisions_total",
@@ -110,6 +112,78 @@ class RateLimiter(Protocol):
         limiter's connection is not simply dropped when the process exits.
         """
         ...
+
+
+class _BodySizeAndIpRateLimitMiddleware:
+    """Enforce the body-size cap and the per-IP rate-limit tier before FastAPI parses the body.
+
+    A pure ASGI middleware, not the ``@app.middleware("http")``/``BaseHTTPMiddleware`` style used
+    by ``_bind_correlation_id`` below: that style already buffers the request body via
+    ``call_next`` before this code would run, defeating a pre-parse check. This wraps the raw ASGI
+    callable directly, so both checks run before any body bytes are read - closing the gap where a
+    malformed or oversized ``/route`` body previously bypassed both rate-limit tiers entirely
+    (ADR-0011).
+
+    Registered via ``app.add_middleware`` *before* the ``_bind_correlation_id`` decorator runs, so
+    it ends up wrapped by (inside) the correlation-ID binder: a short-circuited 413/429 response
+    still gets ``X-Correlation-Id`` bound and echoed, same as every other response.
+
+    Scope: the per-IP rate-limit check applies only to ``POST /route`` (``/health``/``/readyz``/
+    ``/metrics`` stay unthrottled, matching ADR-0007's design). The body-size check is a
+    ``Content-Length`` header comparison only - a deliberate scope decision, not an oversight: a
+    chunked-transfer-encoding body with no ``Content-Length`` is an accepted residual gap for this
+    service's documented deployment model (behind an authenticated gateway, per ADR-0004), not a
+    full streaming byte-cap.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        """Wrap ``app``. The body-size cap is read from ``app.state`` per request, not fixed here.
+
+        Unlike the rate limiters (also built once in ``_lifespan``), the numeric cap itself is
+        cheap to read fresh every request, so it is stored directly on ``app.state`` at startup
+        (``app.state.max_request_body_bytes``) rather than baked into this middleware's
+        constructor - which runs once at import time, before ``Settings()`` has been re-read for
+        the process actually serving traffic (e.g. under a test harness that reconfigures the
+        environment per test and re-triggers the lifespan, not the module import).
+        """
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Run the per-IP rate limit and body-size checks, or pass through to the wrapped app."""
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        app_state = scope["app"].state
+
+        if scope["path"] == "/route" and scope["method"] == "POST":
+            client = scope.get("client")
+            client_host = client[0] if client else "unknown"
+            ip_allowed = await app_state.ip_rate_limiter.allow(f"ip:{client_host}")
+            RATE_LIMIT_DECISIONS_TOTAL.labels(
+                tier="per_ip", outcome="allowed" if ip_allowed else "blocked"
+            ).inc()
+            if not ip_allowed:
+                response = _error_response(
+                    429, "rate_limit_exceeded", "too many requests, try again later"
+                )
+                await response(scope, receive, send)
+                return
+
+        max_body_bytes = app_state.max_request_body_bytes
+        content_length = next(
+            (value for key, value in scope["headers"] if key == b"content-length"), None
+        )
+        if content_length is not None and int(content_length) > max_body_bytes:
+            response = _error_response(
+                413,
+                "payload_too_large",
+                f"request body exceeds the {max_body_bytes}-byte limit",
+            )
+            await response(scope, receive, send)
+            return
+
+        await self._app(scope, receive, send)
 
 
 class AuthenticationError(Exception):
@@ -232,6 +306,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         environment=settings.app_env,
     )
     app.state.api_keys = _required_api_keys()
+    app.state.max_request_body_bytes = settings.max_request_body_bytes
 
     fingerprint_secret = (
         settings.rate_limit_fingerprint_secret.encode()
@@ -274,6 +349,11 @@ app = FastAPI(
     openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
+# Registered before the @app.middleware("http") decorator below, so it ends up wrapped by (inside)
+# the correlation-ID binder - see _BodySizeAndIpRateLimitMiddleware's docstring for why the order
+# matters.
+app.add_middleware(_BodySizeAndIpRateLimitMiddleware)
+
 
 @app.middleware("http")
 async def _bind_correlation_id(
@@ -282,11 +362,20 @@ async def _bind_correlation_id(
     """Bind a correlation ID to every log line emitted while handling this request.
 
     Reuses the caller's ``X-Correlation-Id`` header if present, so a caller's own logs and this
-    service's logs can be joined on the same ID; generates one otherwise. Echoed back on the
-    response so a caller that didn't send one can still correlate afterward. Always cleared once
-    the request finishes, so it never leaks into a later, unrelated request's log lines.
+    service's logs can be joined on the same ID; generates one otherwise. An oversized header
+    value (over ``_MAX_CORRELATION_ID_LENGTH``) is treated the same as a missing one - a fresh ID
+    is generated instead - rather than rejecting the request outright: this header is a caller
+    convenience, not a security control, so an oversized value only costs that one caller its own
+    correlation, not a hard failure. Echoed back on the response so a caller that didn't send one
+    can still correlate afterward. Always cleared once the request finishes, so it never leaks
+    into a later, unrelated request's log lines.
     """
-    correlation_id = request.headers.get("X-Correlation-Id") or str(uuid.uuid4())
+    raw_correlation_id = request.headers.get("X-Correlation-Id")
+    correlation_id = (
+        raw_correlation_id
+        if raw_correlation_id and len(raw_correlation_id) <= _MAX_CORRELATION_ID_LENGTH
+        else str(uuid.uuid4())
+    )
     bind_correlation_id(correlation_id)
     try:
         response = await call_next(request)
@@ -415,15 +504,12 @@ async def route(
     use_case: Annotated[RouteModelUseCase, Depends(get_route_model_use_case)],
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> ModelRouteDecision:
-    """Evaluate one model-routing request and return the resulting decision record."""
-    client_host = http_request.client.host if http_request.client else "unknown"
+    """Evaluate one model-routing request and return the resulting decision record.
 
-    ip_allowed = await http_request.app.state.ip_rate_limiter.allow(f"ip:{client_host}")
-    RATE_LIMIT_DECISIONS_TOTAL.labels(
-        tier="per_ip", outcome="allowed" if ip_allowed else "blocked"
-    ).inc()
-    if not ip_allowed:
-        raise RateLimitExceededError(f"rate limit exceeded for client {client_host!r}")
+    The per-IP rate-limit tier runs earlier, in ``_BodySizeAndIpRateLimitMiddleware`` - before
+    this handler is even reached - so a request that gets this far has already passed it (ADR-0011).
+    """
+    client_host = http_request.client.host if http_request.client else "unknown"
 
     rate_limit_key = f"{client_host}:{request.agent_name}"
     agent_allowed = await http_request.app.state.rate_limiter.allow(rate_limit_key)

@@ -267,12 +267,12 @@ ser positivos.
 |---|---|
 | `schema_version` | Exatamente `1.0` |
 | `requested_at` | Timestamp UTC |
-| `workflow_id`, `task_id`, `agent_name` | Strings não vazias |
+| `workflow_id`, `task_id`, `agent_name` | Strings não vazias, com no máximo 200 caracteres |
 | `workload` | `document_extraction`, `cashflow_analysis`, `findings_correlation`, `opinion_drafting` ou `json_repair` |
 | `risk_level` | `low`, `medium`, `high` ou `critical` |
 | `data_classification` | `public`, `internal`, `confidential` ou `restricted` |
-| `context_tokens_estimated` | Inteiro maior ou igual a zero (tokens de entrada/prompt) |
-| `max_output_tokens_estimated` | Inteiro maior ou igual a zero (tokens de saída/completion esperados) |
+| `context_tokens_estimated` | Inteiro entre zero e 10.000.000 (tokens de entrada/prompt) |
+| `max_output_tokens_estimated` | Inteiro entre zero e 10.000.000 (tokens de saída/completion esperados) |
 | `structured_output_required` | Booleano |
 | `max_latency_ms` | Inteiro positivo |
 | `max_cost_usd` | Valor decimal positivo |
@@ -288,6 +288,7 @@ Os códigos de erro estáveis são:
 | Status HTTP | Código | Significado |
 |---:|---|---|
 | 401 | `unauthorized` | Header `X-API-Key` ausente ou inválido |
+| 413 | `payload_too_large` | O corpo da requisição excede `MAX_REQUEST_BODY_BYTES`, conforme o `Content-Length` declarado |
 | 422 | `invalid_request` | A requisição não corresponde ao contrato |
 | 422 | `no_viable_model_group` | O grupo mapeado para a carga de trabalho falhou em uma restrição rígida |
 | 429 | `rate_limit_exceeded` | Excesso de requisições para o par `(IP do cliente, agent_name)` |
@@ -323,6 +324,7 @@ Outras configurações de runtime:
 | `RATE_LIMIT_MAX_TRACKED_KEYS` | `100000` | Só para o limitador em memória (ignorado quando `REDIS_URL` está definida): limita quantas chaves distintas ficam em memória por nível, descartando a menos usada recentemente ao ultrapassar o limite |
 | `REDIS_URL` | *(ausente)* | Opcional. Compartilha o rate limit entre réplicas via Redis (ADR-0008); requer `uv sync --extra rate-limit`. Se ausente, mantém o limitador padrão em memória, por processo |
 | `RATE_LIMIT_FINGERPRINT_SECRET` | *(ausente)* | Só para o limitador com Redis. Chave HMAC para o fingerprint de log em caso de fail-open; se ausente, usa um segredo aleatório por processo (estável durante o processo, não entre reinicializações) |
+| `MAX_REQUEST_BODY_BYTES` | `16384` | Tamanho máximo do corpo de `POST /route`, verificado contra o `Content-Length` antes do corpo ser interpretado (ADR-0011). Um corpo com `chunked encoding` e sem `Content-Length` não é verificado - veja a [ADR-0011](docs/adr/0011-http-boundary-pre-parse-limits.md) |
 
 ## Autenticação e rate limiting
 
@@ -340,6 +342,9 @@ tentativas repetidas com chave inválida também sejam limitadas: um nível leve
 (`RATE_LIMIT_PER_IP_MAX_REQUESTS` por `RATE_LIMIT_WINDOW_SECONDS`), seguido de um nível por par
 `(IP, agent_name)` (`RATE_LIMIT_MAX_REQUESTS`) - o primeiro nível existe especificamente para que
 um cliente não consiga escapar do segundo apenas variando o `agent_name` enviado a cada tentativa.
+O nível por IP roda em middleware ASGI, antes mesmo do FastAPI interpretar o corpo da requisição
+(ADR-0011), então um corpo malformado ou grande demais ainda conta para ele; o nível por agente
+continua rodando dentro do handler, após a interpretação, já que precisa do `agent_name` do corpo.
 Ultrapassar qualquer um dos dois retorna `429 rate_limit_exceeded`. Por padrão, ambos são
 contadores em memória, de janela fixa, **por processo**, cada um limitado a
 `RATE_LIMIT_MAX_TRACKED_KEYS` chaves distintas - um deployment com múltiplas instâncias aplica o
