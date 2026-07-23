@@ -103,6 +103,17 @@ def test_startup_fails_closed_when_api_keys_is_not_an_object_of_strings(
         pass
 
 
+def test_startup_fails_closed_when_api_keys_has_an_empty_agent_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", json.dumps({"": _TEST_API_KEY}))
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="API_KEYS"), TestClient(app):
+        pass
+
+
 def test_startup_fails_closed_when_rate_limiter_backend_is_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

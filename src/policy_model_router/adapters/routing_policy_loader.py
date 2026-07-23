@@ -24,6 +24,29 @@ class RoutingPolicyLoadError(RuntimeError):
     """Raised when the routing policy file cannot be read into a valid ``RoutingPolicy``."""
 
 
+class _NoDuplicateKeysLoader(yaml.SafeLoader):
+    """``SafeLoader`` that fails on a duplicate mapping key instead of the default silent overwrite.
+
+    Stock PyYAML lets a second ``policy_version:`` (or any other repeated key) silently replace the
+    first without a warning; that would let a copy-paste mistake in the policy file change routing
+    behavior with no error at load time.
+    """
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[object, object]:
+        seen: set[object] = set()
+        for key_node, _value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 class _ModelGroupProfileConfig(BaseModel):
     """Validated YAML shape of one model group's capabilities and authorizations."""
 
@@ -126,7 +149,11 @@ def load_routing_policy(path: Path) -> RoutingPolicy:
         raise RoutingPolicyLoadError(f"cannot read routing policy file {path}: {exc}") from exc
 
     try:
-        raw_data = yaml.safe_load(raw_text)
+        # Ruff S506 / Bandit B506: false positive - _NoDuplicateKeysLoader subclasses SafeLoader and
+        # adds no unsafe constructors; it only rejects duplicate mapping keys before delegating to
+        # the safe ones. Neither linter can verify a custom Loader's safety statically, so both
+        # always flag any yaml.load() call regardless of the Loader argument's actual behavior.
+        raw_data = yaml.load(raw_text, Loader=_NoDuplicateKeysLoader)  # noqa: S506  # nosec B506
     except yaml.YAMLError as exc:
         raise RoutingPolicyLoadError(
             f"routing policy file {path} is not valid YAML: {exc}"

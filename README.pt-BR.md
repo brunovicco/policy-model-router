@@ -73,7 +73,7 @@ candidato.
 | 2 | Nível de risco | O grupo não é autorizado para o nível de risco do fluxo de trabalho da requisição |
 | 3 | Saída estruturada | A requisição exige saída estruturada e o grupo não suporta |
 | 4 | Chamada de ferramentas | A carga de trabalho exige *tool calling* e o grupo não suporta |
-| 5 | Janela de contexto | Os tokens de entrada estimados excedem o limite do grupo |
+| 5 | Janela de contexto | Os tokens de entrada estimados somados aos de saída esperados excedem o limite do grupo |
 | 6 | Teto de custo | O custo estimado do grupo excede `max_cost_usd` |
 | 7 | Teto de latência | A latência típica do grupo excede `max_latency_ms` |
 | 8 | Disponibilidade | O provedor resolve o grupo como indisponível (veja [Disponibilidade](#disponibilidade)) |
@@ -190,25 +190,27 @@ Exemplo de resposta:
     },
     {
       "model_group": "reasoning-medium",
-      "reason": "estimated context 100000 tokens exceeds group limit of 64000 tokens",
+      "reason": "estimated input+output 102000 tokens (input 100000 + output 2000) exceeds group limit of 64000 tokens",
       "reason_code": "context_window_exceeded",
-      "observed_value": "100000",
+      "observed_value": "102000",
       "required_value": "<= 64000"
     }
   ],
   "policy_id": "credit-desk-routing",
   "policy_version": "1.0.0",
   "policy_digest": "sha256:2f1a...c9",
-  "service_version": "0.1.0",
+  "service_version": "0.2.0",
   "environment": "production"
 }
 ```
 
 `policy_id`/`policy_version`/`policy_digest` identificam exatamente qual política de roteamento
-produziu esta decisão (`policy_digest` é um hash `sha256` dos bytes brutos do YAML carregado,
-calculado no momento do carregamento - não é mantido manualmente, então muda sempre que o conteúdo
-do arquivo muda, mesmo que ninguém tenha lembrado de incrementar `policy_version`);
-`service_version`/`environment` identificam o deployment que a produziu. Veja a
+produziu esta decisão (`policy_digest` é um hash `sha256` do conteúdo textual decodificado do YAML
+carregado, calculado no momento do carregamento - as quebras de linha são normalizadas pela leitura
+em modo texto do Python, então variantes CRLF e LF do mesmo conteúdo geram o mesmo hash - não é
+mantido manualmente, então muda sempre que o conteúdo do arquivo muda, mesmo que ninguém tenha
+lembrado de incrementar `policy_version`); `service_version`/`environment` identificam o deployment
+que a produziu. Veja a
 [ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md).
 
 Cada candidato rejeitado também carrega um `reason_code` legível por máquina (um por restrição em

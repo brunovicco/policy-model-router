@@ -139,7 +139,7 @@ def _required_api_keys() -> dict[str, str]:
     if (
         not isinstance(parsed, dict)
         or not parsed
-        or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in parsed.items())
+        or not all(isinstance(k, str) and k and isinstance(v, str) and v for k, v in parsed.items())
     ):
         raise RuntimeError(
             "API_KEYS environment variable must be a non-empty JSON object of "

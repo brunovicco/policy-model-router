@@ -8,7 +8,7 @@
 - Layout: `src/policy_model_router`
 - Tests: pytest
 - Architecture: Clean Architecture
-- Container: multi-stage `Dockerfile`; replace its placeholder `CMD` when an entrypoint exists
+- Container: multi-stage `Dockerfile` running `uvicorn policy_model_router.entrypoints.http:app`
 
 Keep these facts and the commands below current as the project evolves.
 

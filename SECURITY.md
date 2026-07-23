@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-This project has not yet made a tagged release; `main` is the only supported line. Security fixes
-land there and are not backported.
+The supported line is the latest tagged release (see [CHANGELOG.md](CHANGELOG.md)) and `main`.
+Security fixes land on `main` and are not backported to older tags.
 
 ## Reporting a vulnerability
 

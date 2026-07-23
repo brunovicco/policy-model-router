@@ -12,10 +12,16 @@ generic settings field would risk changing its carefully-worded fail-closed erro
 real benefit.
 """
 
+import math
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_AppEnv = Literal["development", "staging", "production", "test"]
+_LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+_LogFormat = Literal["json", "console"]
 
 
 class Settings(BaseSettings):
@@ -29,9 +35,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(frozen=True, extra="ignore")
 
     routing_policy_path: Path = Field(default=Path("config/routing_policy.yaml"))
-    app_env: str = Field(default="development")
-    log_level: str = Field(default="INFO")
-    log_format: str = Field(default="json")
+    app_env: _AppEnv = Field(default="development")
+    log_level: _LogLevel = Field(default="INFO")
+    log_format: _LogFormat = Field(default="json")
     rate_limit_max_requests: int = Field(default=60, gt=0)
     rate_limit_per_ip_max_requests: int = Field(default=600, gt=0)
     rate_limit_window_seconds: float = Field(default=60.0, gt=0)
@@ -51,3 +57,23 @@ class Settings(BaseSettings):
         configured", diverging from the pre-existing ``if not redis_url:`` check this replaces.
         """
         return value or None
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _normalize_log_level(cls, value: object) -> object:
+        """Uppercase/strip before the closed-vocabulary check, keeping prior case-insensitivity."""
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("log_format", mode="before")
+    @classmethod
+    def _normalize_log_format(cls, value: object) -> object:
+        """Lowercase/strip before the closed-vocabulary check, keeping prior case-insensitivity."""
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("rate_limit_window_seconds")
+    @classmethod
+    def _must_be_finite(cls, value: float) -> float:
+        """Reject non-finite values: ``gt=0`` alone does not exclude ``inf``, which breaks Redis."""
+        if not math.isfinite(value):
+            raise ValueError("rate_limit_window_seconds must be a finite number")
+        return value

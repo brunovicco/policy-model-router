@@ -70,7 +70,7 @@ Order matters because the first failed constraint becomes that candidate's rejec
 | 2 | Risk level | The group is not authorized for the request's workflow risk tier |
 | 3 | Structured output | The request requires structured output and the group does not support it |
 | 4 | Tool calling | The workload requires tool calling and the group does not support it |
-| 5 | Context window | Estimated input tokens exceed the group's limit |
+| 5 | Context window | Estimated input + expected output tokens together exceed the group's limit |
 | 6 | Cost ceiling | Estimated group cost exceeds `max_cost_usd` |
 | 7 | Latency ceiling | Typical group latency exceeds `max_latency_ms` |
 | 8 | Availability | The provider resolves the group as unavailable (see [Availability](#availability)) |
@@ -185,25 +185,27 @@ Example response:
     },
     {
       "model_group": "reasoning-medium",
-      "reason": "estimated context 100000 tokens exceeds group limit of 64000 tokens",
+      "reason": "estimated input+output 102000 tokens (input 100000 + output 2000) exceeds group limit of 64000 tokens",
       "reason_code": "context_window_exceeded",
-      "observed_value": "100000",
+      "observed_value": "102000",
       "required_value": "<= 64000"
     }
   ],
   "policy_id": "credit-desk-routing",
   "policy_version": "1.0.0",
   "policy_digest": "sha256:2f1a...c9",
-  "service_version": "0.1.0",
+  "service_version": "0.2.0",
   "environment": "production"
 }
 ```
 
 `policy_id`/`policy_version`/`policy_digest` identify exactly which routing policy produced this
-decision (`policy_digest` is a `sha256` hash of the loaded YAML file's raw bytes, computed at
-load time - not hand-maintained, so it changes whenever the file's content changes even if nobody
-remembered to bump `policy_version`); `service_version`/`environment` identify the deployment that
-produced it. See [ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md).
+decision (`policy_digest` is a `sha256` hash of the loaded YAML file's decoded text content,
+computed at load time - line endings are normalized by Python's text-mode read, so CRLF and LF
+variants of the same content hash identically - not hand-maintained, so it changes whenever the
+file's content changes even if nobody remembered to bump `policy_version`); `service_version`/
+`environment` identify the deployment that produced it. See
+[ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md).
 
 Each rejected candidate also carries a machine-readable `reason_code` (one per constraint in
 [Constraint order](#constraint-order), plus `workload_mapped_elsewhere` for a candidate that passed

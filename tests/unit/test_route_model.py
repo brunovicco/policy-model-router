@@ -216,7 +216,7 @@ async def test_route_rejects_multiple_groups_via_different_constraints_simultane
     assert decision.selected_model_group == ModelGroup.REASONING_STRONG
     reasons = {c.model_group: c.reason for c in decision.rejected_candidates}
     assert "restricted" in reasons[ModelGroup.FAST_SMALL]
-    assert "context" in reasons[ModelGroup.REASONING_MEDIUM]
+    assert "exceeds group limit" in reasons[ModelGroup.REASONING_MEDIUM]
 
 
 @pytest.mark.anyio

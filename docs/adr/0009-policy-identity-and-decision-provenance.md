@@ -19,8 +19,9 @@ between what the service claims (`docs/ARCHITECTURE.md`, the README) and what it
 **The routing policy declares its own identity; the loader adds tamper-evidence.**
 `config/routing_policy.yaml` gains two required top-level fields, `policy_id` and `policy_version`
 (both non-empty strings, validated in `adapters/routing_policy_loader.py::_RoutingPolicyConfig`).
-`load_routing_policy` additionally computes `policy_digest` - `sha256:<hex>` of the raw file bytes,
-*not* trusted from the file itself - so a decision is traceable to exactly what content was loaded,
+`load_routing_policy` additionally computes `policy_digest` - `sha256:<hex>` of the file's decoded
+text content (line endings normalized by Python's text-mode read, so CRLF and LF variants of the
+same content hash identically), *not* trusted from the file itself - so a decision is traceable to exactly what content was loaded,
 independent of whether whoever edited the file remembered to bump `policy_version`.
 `domain/catalog.py::RoutingPolicy` carries all three.
 
