@@ -169,6 +169,46 @@ def test_shutdown_closes_the_redis_rate_limiter_connections(
     assert len(closed_clients) == 2
 
 
+def test_shutdown_still_closes_the_second_limiter_when_the_first_close_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure releasing one rate-limit tier's connection must not skip the other's."""
+    fake_redis_module = types.ModuleType("redis")
+    fake_asyncio_module = types.ModuleType("redis.asyncio")
+    created_clients: list[Any] = []
+    closed_clients: list[Any] = []
+
+    class _FlakyOnCloseClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            created_clients.append(self)
+
+        @classmethod
+        def from_url(cls, *_args: object, **_kwargs: object) -> "_FlakyOnCloseClient":
+            return cls()
+
+        async def ping(self) -> None:
+            return
+
+        async def aclose(self) -> None:
+            if self is created_clients[0]:
+                raise ConnectionError("redis unreachable during shutdown")
+            closed_clients.append(self)
+
+    fake_asyncio_module.Redis = _FlakyOnCloseClient  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "redis", fake_redis_module)
+    monkeypatch.setitem(sys.modules, "redis.asyncio", fake_asyncio_module)
+
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+
+    with TestClient(app):
+        pass
+
+    assert len(created_clients) == 2
+    assert closed_clients == [created_clients[1]]
+
+
 def test_route_returns_the_decision_for_a_valid_request(client: TestClient) -> None:
     response = client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
 

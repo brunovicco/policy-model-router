@@ -84,3 +84,20 @@ async def test_allow_repairs_a_ttl_lost_between_incr_and_expire(redis_client: An
     await limiter.allow(key)
 
     assert await redis_client.ttl(full_key) > 0
+
+
+@pytest.mark.anyio
+async def test_allow_enforces_a_sub_second_window_against_real_redis(redis_client: Any) -> None:
+    """Regression test: a fractional window must not truncate to a zero TTL.
+
+    ``EXPIRE key 0`` deletes the key immediately (Redis treats a non-positive TTL as "delete
+    now"), so truncating ``window_seconds=0.5`` to whole seconds before setting the TTL would
+    silently disable enforcement - every call would see a fresh, just-recreated key and be
+    allowed. Millisecond precision (``PEXPIRE``) must keep the counter alive for the whole
+    sub-second window instead.
+    """
+    key = f"test:{uuid.uuid4()}"
+    limiter = RedisRateLimiter(redis_client, max_requests=1, window_seconds=0.5)
+
+    assert await limiter.allow(key) is True
+    assert await limiter.allow(key) is False

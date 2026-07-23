@@ -16,8 +16,13 @@ uv run python scripts/quality_gate.py
 
 ```bash
 docker build -t policy-model-router .
-docker run --rm -p 8000:8000 policy-model-router
+docker run --rm -p 8000:8000 \
+  -e API_KEYS='{"credit-analysis-agent":"dev-local-key"}' \
+  policy-model-router
 ```
+
+`API_KEYS` is required - the service refuses to start without it (see
+[Authentication and rate limiting](../README.md#authentication-and-rate-limiting)).
 
 `Dockerfile` is a multi-stage, uv-based build: a `builder` stage installs the locked
 dependencies and builds the package, then the resulting virtualenv and source are copied into a
@@ -37,7 +42,9 @@ limiter needs none of this.
 ```bash
 docker compose up -d redis
 uv sync --extra rate-limit
-REDIS_URL=redis://localhost:6379/0 uv run uvicorn policy_model_router.entrypoints.http:app --reload
+REDIS_URL=redis://localhost:6379/0 \
+API_KEYS='{"credit-analysis-agent":"dev-local-key"}' \
+uv run uvicorn policy_model_router.entrypoints.http:app --reload
 ```
 
 `docker compose down` stops it. Unit tests never talk to a real Redis (they fake the client), but
