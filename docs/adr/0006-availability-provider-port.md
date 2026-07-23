@@ -11,11 +11,11 @@ could be selected while its actual deployments were down, because nothing polled
 gateway health, and the policy file had to be hand-edited and the service redeployed to reflect an
 outage.
 
-Closing that gap properly — an adapter that calls out to a provider or gateway to ask "is this
-group actually healthy right now" — is a real integration with its own failure modes: what to call,
+Closing that gap properly - an adapter that calls out to a provider or gateway to ask "is this
+group actually healthy right now" - is a real integration with its own failure modes: what to call,
 how to time out and retry, what to do when the health check itself is unreachable, and how to cache
 results so every routing decision doesn't trigger a fresh network call. None of that exists yet,
-and per ADR-0004 this service currently has **no outbound network dependency at all** — introducing
+and per ADR-0004 this service currently has **no outbound network dependency at all** - introducing
 one is a decision with its own tradeoffs (latency added to every `/route` call, a new failure mode
 for the router itself, credentials to manage for the health-check target) that shouldn't be made
 implicitly while fixing a documentation gap.
@@ -29,7 +29,7 @@ Introduce the seam without introducing the network call:
 - `RouteModelUseCase` takes an `AvailabilityProvider` as a required constructor argument and, for
   every candidate model group, computes an effective profile via `dataclasses.replace(profile,
   available=self._availability.is_available(model_group, profile.available))` before running it
-  through `CONSTRAINTS`. `check_availability` itself is unchanged — it still just reads
+  through `CONSTRAINTS`. `check_availability` itself is unchanged - it still just reads
   `profile.available` off whatever profile it's given.
 - `adapters/availability.py::StaticAvailabilityProvider` is the only implementation shipped today:
   it returns `declared_available` unchanged. Behavior is identical to before this ADR.
@@ -43,7 +43,7 @@ Introduce the seam without introducing the network call:
 - A future dynamic adapter (e.g. one that calls the LiteLLM gateway's health endpoint, with an
   explicit timeout, bounded retries, and a cache to avoid a network round trip per `/route` call)
   is now a new adapter behind an existing port, not a change to the use case, the domain
-  constraints, or their tests. That adapter is its own ADR when it exists — this one only
+  constraints, or their tests. That adapter is its own ADR when it exists - this one only
   authorizes the seam, not the integration.
 - Tests exercise the seam directly: `tests/unit/test_route_model.py` includes a fake
   `AvailabilityProvider` that overrides a policy-declared-available group to unavailable, proving

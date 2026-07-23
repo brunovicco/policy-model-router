@@ -35,6 +35,7 @@ class _FakeRedisClient:
         self.counts: dict[str, int] = {}
         self.expirations: dict[str, int] = {}
         self._has_ttl: set[str] = set()
+        self.closed = False
 
     async def eval(self, _script: str, _numkeys: int, key: str, window_seconds: int) -> int:
         """Increment ``key`` and set its TTL if this is the first hit or the TTL is missing."""
@@ -47,6 +48,10 @@ class _FakeRedisClient:
     async def ping(self) -> None:
         """Succeed unconditionally; failure is simulated by a different fake below."""
         return
+
+    async def aclose(self) -> None:
+        """Record that the connection was released."""
+        self.closed = True
 
     def drop_ttl(self, key: str) -> None:
         """Simulate a crash between INCR and EXPIRE by forgetting ``key``'s TTL bookkeeping."""
@@ -63,6 +68,10 @@ class _FailingClient:
 
     async def ping(self) -> None:
         """Always raise, simulating a failed startup connectivity check."""
+        raise ConnectionError("redis unreachable")
+
+    async def aclose(self) -> None:
+        """Always raise, simulating a failure while releasing the connection."""
         raise ConnectionError("redis unreachable")
 
 
@@ -221,3 +230,13 @@ async def test_ping_succeeds_when_the_backend_is_reachable() -> None:
     limiter = RedisRateLimiter(_FakeRedisClient(), max_requests=1, window_seconds=60)
 
     await limiter.ping()
+
+
+@pytest.mark.anyio
+async def test_close_releases_the_underlying_connection() -> None:
+    client = _FakeRedisClient()
+    limiter = RedisRateLimiter(client, max_requests=1, window_seconds=60)
+
+    await limiter.close()
+
+    assert client.closed is True

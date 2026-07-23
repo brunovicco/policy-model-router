@@ -82,6 +82,7 @@ def configured_checks(root: Path) -> list[Check]:
         )
     )
     checks.append(Check("dependencies", ("pip-audit",)))
+    checks.append(Check("packaging", ("uv", "build", "--wheel")))
     return checks
 
 

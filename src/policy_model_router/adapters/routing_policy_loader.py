@@ -10,7 +10,7 @@ import types
 from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import pydantic
 import yaml
@@ -55,7 +55,7 @@ class _RoutingPolicyConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: str
+    schema_version: Literal["1.0"]
     policy_id: Annotated[str, Field(min_length=1)]
     policy_version: Annotated[str, Field(min_length=1)]
     model_groups: dict[ModelGroup, _ModelGroupProfileConfig]

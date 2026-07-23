@@ -113,3 +113,7 @@ class RedisRateLimiter:
         from :meth:`allow` are handled leniently (fail open) instead.
         """
         await self._client.ping()
+
+    async def close(self) -> None:
+        """Release the underlying Redis connection(s); call once during graceful shutdown."""
+        await self._client.aclose()

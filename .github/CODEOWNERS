@@ -1,0 +1,11 @@
+# Default owner for everything not matched below.
+* @brunovicco
+
+# The declarative routing policy and its schema are the highest-blast-radius files in this repo:
+# a bad change here changes what every workload is authorized to route to.
+/config/ @brunovicco
+/src/policy_model_router/adapters/routing_policy_loader.py @brunovicco
+/src/policy_model_router/domain/ @brunovicco
+
+# Architectural decisions.
+/docs/adr/ @brunovicco

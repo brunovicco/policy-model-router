@@ -1,8 +1,11 @@
 """Closed vocabularies for model-routing decisions.
 
-Mirrors the shape of ``credit_desk_contracts.enums`` in the ``multi-agent-credit-desk`` monorepo
-(a separate repository; not imported here - see ``docs/adr/0001-clean-architecture.md`` and the
-project README for why this service has no dependency on that monorepo).
+``DataClassification``, ``RiskLevel``, ``Workload``, and ``ModelGroup`` mirror the shape of
+``credit_desk_contracts.enums`` in the ``multi-agent-credit-desk`` monorepo (a separate repository;
+not imported here - see ``docs/adr/0001-clean-architecture.md`` and the project README for why this
+service has no dependency on that monorepo). ``ReasonCode`` is this router's own vocabulary, not
+part of that mirror - see ADR-0009's provenance rationale and ``entrypoints/contracts.py``'s
+module docstring for other deliberate, documented divergences from the mirrored shape.
 """
 
 from enum import StrEnum
@@ -43,3 +46,23 @@ class ModelGroup(StrEnum):
     REASONING_MEDIUM = "reasoning-medium"
     REASONING_STRONG = "reasoning-strong"
     FAST_STRUCTURED_OUTPUT = "fast-structured-output"
+
+
+class ReasonCode(StrEnum):
+    """Machine-readable reason a candidate model group was rejected, one per constraint.
+
+    Each value corresponds one-to-one with a predicate in ``domain/constraints.py::CONSTRAINTS``
+    (in the same order), plus ``WORKLOAD_MAPPED_ELSEWHERE`` for a candidate that passed every
+    constraint but simply isn't the workload's declaratively mapped group.
+    """
+
+    DATA_CLASSIFICATION_NOT_AUTHORIZED = "data_classification_not_authorized"
+    RISK_LEVEL_NOT_AUTHORIZED = "risk_level_not_authorized"
+    STRUCTURED_OUTPUT_UNSUPPORTED = "structured_output_unsupported"
+    TOOL_CALLING_UNSUPPORTED = "tool_calling_unsupported"
+    CONTEXT_WINDOW_EXCEEDED = "context_window_exceeded"
+    COST_CEILING_EXCEEDED = "cost_ceiling_exceeded"
+    LATENCY_CEILING_EXCEEDED = "latency_ceiling_exceeded"
+    MODEL_GROUP_UNAVAILABLE = "model_group_unavailable"
+    AGENT_NOT_ALLOWED = "agent_not_allowed"
+    WORKLOAD_MAPPED_ELSEWHERE = "workload_mapped_elsewhere"

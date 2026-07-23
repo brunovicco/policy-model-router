@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from policy_model_router.domain.enums import DataClassification, ModelGroup, RiskLevel, Workload
+from policy_model_router.domain.enums import (
+    DataClassification,
+    ModelGroup,
+    ReasonCode,
+    RiskLevel,
+    Workload,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,10 +39,20 @@ class RouteRequest:
 
 @dataclass(frozen=True, slots=True)
 class RejectedCandidate:
-    """One model group excluded from a routing decision, with the eliminating reason."""
+    """One model group excluded from a routing decision, with the eliminating reason.
+
+    ``reason`` is the existing human-readable text; ``reason_code``/``observed_value``/
+    ``required_value`` are the machine-readable form of the same rejection, so a caller doesn't
+    have to parse ``reason`` to build an audit trail or a UI (see
+    ``domain/constraints.py::ConstraintFailure``, which produces all four together for every
+    constraint except the "mapped elsewhere" case, which this module constructs directly).
+    """
 
     model_group: ModelGroup
     reason: str
+    reason_code: ReasonCode
+    observed_value: str
+    required_value: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +88,13 @@ class NoViableModelGroupError(Exception):
     be routed is a hard failure the caller must handle, not a silent reroute.
     """
 
-    def __init__(self, workload: Workload, model_group: ModelGroup, reason: str) -> None:
+    def __init__(
+        self,
+        workload: Workload,
+        model_group: ModelGroup,
+        reason: str,
+        reason_code: ReasonCode,
+    ) -> None:
         """Record the workload, its mapped (and rejected) model group, and the reason."""
         super().__init__(
             f"no viable model group for workload {workload.value!r}: "
@@ -81,3 +103,4 @@ class NoViableModelGroupError(Exception):
         self.workload = workload
         self.model_group = model_group
         self.reason = reason
+        self.reason_code = reason_code

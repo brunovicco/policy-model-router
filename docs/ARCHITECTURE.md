@@ -45,8 +45,7 @@ src/policy_model_router/
 │   ├── id_generator.py           # Uuid4IdGenerator
 │   ├── availability.py           # StaticAvailabilityProvider (no live health check; ADR-0006)
 │   ├── rate_limiter.py           # InMemoryRateLimiter, default per-process limiter (ADR-0007)
-│   ├── redis_rate_limiter.py     # RedisRateLimiter, optional cross-replica limiter (ADR-0008)
-│   └── tracing.py                # Opt-in, metadata-only tracing support
+│   └── redis_rate_limiter.py     # RedisRateLimiter, optional cross-replica limiter (ADR-0008)
 └── entrypoints/
     ├── contracts.py     # Pydantic wire contracts + domain <-> wire mapping
     ├── http.py           # FastAPI app: POST /route (auth+rate limit), /health, /readyz, /metrics
@@ -78,8 +77,7 @@ today: it passes the policy's declared `available` flag through unchanged (ADR-0
 `rate_limiter.py::InMemoryRateLimiter` is the default, per-process, fixed-window limiter;
 `redis_rate_limiter.py::RedisRateLimiter` is the optional, Redis-backed alternative shared across
 replicas when `REDIS_URL` is configured (ADR-0008) - both implement the same `RateLimiter` port and
-are consumed directly by the HTTP entrypoint. `tracing.py` provides metadata-only tracing per
-`docs/LLM_OBSERVABILITY.md`.
+are consumed directly by the HTTP entrypoint.
 
 ### Entrypoints
 
@@ -108,13 +106,13 @@ Enforced by `scripts/validate_architecture.py` as part of the quality gate.
 - **Configuration**: `ROUTING_POLICY_PATH`, `APP_ENV`, `LOG_LEVEL`, `LOG_FORMAT`, `API_KEYS`,
   `RATE_LIMIT_MAX_REQUESTS`, `RATE_LIMIT_PER_IP_MAX_REQUESTS`, `RATE_LIMIT_WINDOW_SECONDS`,
   `RATE_LIMIT_FINGERPRINT_SECRET` as environment variables; no other runtime configuration.
-- **Logging**: structured JSON to stdout via `configure_logging()`; no prompt, response, or
-  personal-data content is logged.
-- **Tracing**: metadata-only by default; see `docs/LLM_OBSERVABILITY.md` for the content-tracing
-  opt-in and its approval requirements.
+- **Logging**: structured JSON to stdout via `configure_logging()`, with a correlation ID
+  (`X-Correlation-Id`, reused from the caller or generated) bound for the duration of each
+  request; no prompt, response, or personal-data content is logged. This service performs no LLM
+  call tracing - it never calls an LLM (ADR-0004) - so there is no tracing adapter to configure.
 - **Authentication**: per-agent API keys (`X-API-Key` header, looked up by the request's
   `agent_name`), required to start the service and checked with a constant-time comparison; not
-  full IAM — no expiry, scoping, or identity assurance beyond "knew the right key" (ADR-0007,
+  full IAM - no expiry, scoping, or identity assurance beyond "knew the right key" (ADR-0007,
   amended).
 - **Rate limiting**: two fixed-window tiers, both checked before authentication - a light tier per
   client IP alone, then a tier per `(client IP, agent_name)`, closing the bypass where varying
@@ -176,10 +174,10 @@ should not be assumed fixed:
 
 | Gap | Current state | Consequence |
 |---|---|---|
-| No live availability signal | `AvailabilityProvider` (ADR-0006, amended to be `async`) is a real seam, but the only shipped implementation (`StaticAvailabilityProvider`) still just passes through the static YAML flag; nothing polls provider/gateway health | A group can be selected while its actual deployments are down; the policy file must be edited and the service redeployed to reflect an outage. Not resolved: no real health-check target exists yet to poll — adding one now would mean integrating against a system that isn't there |
+| No live availability signal | `AvailabilityProvider` (ADR-0006, amended to be `async`) is a real seam, but the only shipped implementation (`StaticAvailabilityProvider`) still just passes through the static YAML flag; nothing polls provider/gateway health | A group can be selected while its actual deployments are down; the policy file must be edited and the service redeployed to reflect an outage. Not resolved: no real health-check target exists yet to poll - adding one now would mean integrating against a system that isn't there |
 | `/readyz` does not probe Redis | Returns ready once startup completed - including a successful `ping()` of the rate limiter's Redis backend, when `REDIS_URL` is configured, but only at that one moment (ADR-0004, ADR-0008) | Cannot detect a Redis outage, or a policy that loaded successfully but is semantically wrong for the environment, once the process is already running |
-| `/metrics` (and `/health`/`/readyz`) have no network-level restriction configured in this repo | Unauthenticated and unthrottled by design (ADR-0007), matching common health/scrape-probe practice; no ingress/mesh boundary is defined in `Dockerfile`/`docker-compose.yml` | Anyone who can reach the port can read metrics (minor recon: process/GC stats, `/route` outcome counts). Operators must restrict this at the ingress/mesh layer themselves — same as the existing "deploy `/route` behind an authenticated gateway" requirement |
-| Rate-limit key trusts only the raw TCP peer address | `entrypoints/http.py` never reads `X-Forwarded-For`/`Forwarded`; no `ProxyHeadersMiddleware`, no `--forwarded-allow-ips` | Behind a reverse proxy, every real client shares the proxy's IP as the key's IP component, collapsing per-client granularity to one bucket (for both rate-limit tiers). A deployment that later enables proxy-header trust *without* restricting it to the proxy's own address would let any client forge the header and multiply its quota — a known misconfiguration to avoid, not current behavior |
+| `/metrics` (and `/health`/`/readyz`) have no network-level restriction configured in this repo | Unauthenticated and unthrottled by design (ADR-0007), matching common health/scrape-probe practice; no ingress/mesh boundary is defined in `Dockerfile`/`docker-compose.yml` | Anyone who can reach the port can read metrics (minor recon: process/GC stats, `/route` outcome counts). Operators must restrict this at the ingress/mesh layer themselves - same as the existing "deploy `/route` behind an authenticated gateway" requirement |
+| Rate-limit key trusts only the raw TCP peer address | `entrypoints/http.py` never reads `X-Forwarded-For`/`Forwarded`; no `ProxyHeadersMiddleware`, no `--forwarded-allow-ips` | Behind a reverse proxy, every real client shares the proxy's IP as the key's IP component, collapsing per-client granularity to one bucket (for both rate-limit tiers). A deployment that later enables proxy-header trust *without* restricting it to the proxy's own address would let any client forge the header and multiply its quota - a known misconfiguration to avoid, not current behavior |
 | `credit_desk_contracts` mirror has no automated compatibility check | `entrypoints/contracts.py` originally mirrored `credit_desk_contracts.routing` field-for-field by hand; ADR-0009 and ADR-0010 added fields the external monorepo does not have yet, and there is still no shared package, published JSON Schema, or contract test between the two repos | The two contracts can drift silently; the external monorepo must be updated by hand to match, and nothing in this repo's CI would catch a future divergence |
 
 **Resolved:** the API key was a single shared secret for the whole service; ADR-0007's 2026-07-22
@@ -201,11 +199,11 @@ Redis failure counter and no decision provenance beyond a bare `routing_decision
 `policy_id`/`policy_version`/`policy_digest`/`service_version`/`environment` to every decision).
 `check_max_cost` previously compared one flat number per model group regardless of request size;
 ADR-0010 made it a function of the request's actual estimated input/output token counts. All
-resolutions have documented residual limits above and in their ADRs — none is full IAM, a highly
+resolutions have documented residual limits above and in their ADRs - none is full IAM, a highly
 available rate-limiting service, a complete metrics surface, or a live-pricing cost model.
 
 Add fallback/scoring behavior, a live health check, or stronger identity/HA guarantees only against
-a concrete requirement (an incident, a threat model, or an evaluation dataset for tie-breaking) —
+a concrete requirement (an incident, a threat model, or an evaluation dataset for tie-breaking) -
 not speculatively.
 
 ## Diagrams

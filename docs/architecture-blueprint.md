@@ -4,7 +4,7 @@ This file exists because `domain/catalog.py` and `domain/constraints.py` referen
 "`docs/architecture-blueprint.md` section 2.3" for the data-classification authorization rule
 this router enforces. That reference predates this file; this document is the local, authoritative
 copy of the one rule this repository depends on. It is not a copy of any platform-wide or
-multi-service architecture document — this service has no code or documentation dependency on the
+multi-service architecture document - this service has no code or documentation dependency on the
 separate `multi-agent-credit-desk` monorepo (see ADR-0001 and the project README).
 
 ## Section 2.3: Data-classification authorization for model groups
@@ -42,5 +42,5 @@ other deployments in the pool are cleared.
 **Operational implication.** Whenever a deployment's clearance changes, or a deployment is added to
 or removed from a group's provider pool, `authorized_data_classifications` for the affected model
 group(s) in `config/routing_policy.yaml` must be updated to match. This router has no way to detect
-that the policy file is stale — it trusts the file as the authorized statement of clearance for
+that the policy file is stale - it trusts the file as the authorized statement of clearance for
 its environment.

@@ -4,13 +4,15 @@ Defaults are maximally permissive (a request/profile/rule that passes every cons
 test can override only the field relevant to the constraint under test.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 import pytest
+import structlog
 
+from policy_model_router.adapters.redis_rate_limiter import logger as _redis_rate_limiter_logger
 from policy_model_router.domain.catalog import ModelGroupProfile, WorkloadRule
 from policy_model_router.domain.enums import DataClassification, ModelGroup, RiskLevel, Workload
 from policy_model_router.domain.routing import RouteRequest
@@ -22,6 +24,29 @@ def anyio_backend() -> str:
     fastapi/httpx; this avoids adding pytest-asyncio just to run a handful of async tests).
     """
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _reset_structlog() -> Generator[None]:
+    """Reset structlog's global configuration and logger cache after every test.
+
+    Several tests call ``configure_logging()`` (via ``TestClient(app)``'s lifespan) or
+    ``structlog.testing.capture_logs()``, both of which mutate structlog's *process-global*
+    configuration. ``structlog.reset_defaults()`` undoes that, but it cannot undo
+    ``cache_logger_on_first_use``'s effect on an already-resolved module-level logger: structlog
+    caches a resolved logger by monkeypatching ``.bind`` directly onto that specific proxy
+    *instance* (see ``structlog._config.BoundLoggerLazyProxy.bind``), which no amount of
+    reconfiguring the global config can reverse. ``redis_rate_limiter.py``'s module-level
+    ``logger`` is exactly such a proxy: the first test that logs through it while
+    ``cache_logger_on_first_use=True`` (set by ``configure_logging()``) permanently pins it to
+    that run's processor chain, silently breaking every later test's ``capture_logs()`` assertions
+    regardless of ordering. Popping the instance-level ``bind`` override restores the proxy to its
+    lazy, unresolved state so the next test starts clean.
+    """
+    yield
+    structlog.contextvars.clear_contextvars()
+    structlog.reset_defaults()
+    vars(_redis_rate_limiter_logger).pop("bind", None)
 
 
 @pytest.fixture

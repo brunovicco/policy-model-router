@@ -71,6 +71,13 @@ async def test_ping_is_a_no_op() -> None:
 
 
 @pytest.mark.anyio
+async def test_close_is_a_no_op() -> None:
+    limiter = InMemoryRateLimiter(max_requests=1, window_seconds=60)
+
+    await limiter.close()
+
+
+@pytest.mark.anyio
 async def test_evicts_the_oldest_key_once_the_tracked_key_limit_is_exceeded() -> None:
     """Bounds memory when many distinct keys are seen, e.g. many client IPs over a long uptime."""
     clock = _FakeClock()

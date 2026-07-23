@@ -1,24 +1,28 @@
 """Structured logging bootstrap.
 
 Call :func:`configure_logging` once, at process startup, before any other code
-emits a log line. Renders JSON to stdout by default; set ``LOG_FORMAT=console``
+emits a log line. Renders JSON to stdout by default; pass ``json_format=False``
 for a human-readable renderer during local development. Never log secrets,
 personal data, prompts, or model responses - see
 ``.claude/rules/security-privacy.md``.
 """
 
 import logging
-import os
 import sys
 
 import structlog
 
 
-def configure_logging(*, service: str, environment: str, version: str) -> None:
-    """Configure structlog and standard-library logging for this process."""
-    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-    json_logs = os.environ.get("LOG_FORMAT", "json").strip().lower() != "console"
+def configure_logging(
+    *, service: str, environment: str, version: str, level: str = "INFO", json_format: bool = True
+) -> None:
+    """Configure structlog and standard-library logging for this process.
+
+    ``level`` and ``json_format`` are the caller's already-validated configuration (see
+    ``entrypoints/settings.py::Settings``), not read from the environment here - this module has
+    no env var reads of its own.
+    """
+    resolved_level = getattr(logging, level.upper(), logging.INFO)
 
     shared_processors: list[structlog.typing.Processor] = [
         structlog.contextvars.merge_contextvars,
@@ -36,7 +40,9 @@ def configure_logging(*, service: str, environment: str, version: str) -> None:
         cache_logger_on_first_use=True,
     )
 
-    renderer = structlog.processors.JSONRenderer() if json_logs else structlog.dev.ConsoleRenderer()
+    renderer = (
+        structlog.processors.JSONRenderer() if json_format else structlog.dev.ConsoleRenderer()
+    )
     formatter = structlog.stdlib.ProcessorFormatter(
         foreign_pre_chain=shared_processors,
         processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, renderer],
@@ -47,7 +53,7 @@ def configure_logging(*, service: str, environment: str, version: str) -> None:
 
     root_logger = logging.getLogger()
     root_logger.handlers = [handler]
-    root_logger.setLevel(level)
+    root_logger.setLevel(resolved_level)
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(
