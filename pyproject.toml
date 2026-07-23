@@ -1,6 +1,6 @@
 [project]
 name = "policy-model-router"
-version = "0.1.0"
+version = "0.2.0"
 description = "Deterministic, policy-based model-group router for governed LLM workloads"
 readme = "README.md"
 license = "MIT"
