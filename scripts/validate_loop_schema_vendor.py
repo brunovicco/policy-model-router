@@ -13,7 +13,21 @@ COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 EXPECTED_REPOSITORY = "brunovicco/engineering-loop-schemas"
-REQUIRED_FILES = {"__init__.py", "models.py", "validate_contract.py"}
+EXPECTED_MANIFEST_VERSION = "2.0.0"
+# The rendered bundle (manifest 2.0.0) ships the stdlib validator, models,
+# resource loader, and the four canonical schemas. The set is fixed on purpose:
+# an unexpected extra or missing file is an integrity failure, not a warning.
+REQUIRED_FILES = {
+    "__init__.py",
+    "_stdlib_jsonschema.py",
+    "models.py",
+    "schema_resources.py",
+    "validate_contract.py",
+    "schemas/builder-result.schema.json",
+    "schemas/contract.schema.json",
+    "schemas/evidence.schema.json",
+    "schemas/verdict.schema.json",
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -42,8 +56,11 @@ def validate_manifest(vendor_dir: Path) -> list[str]:
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         return [f"could not load manifest.json: {exc}"]
 
-    if manifest.get("manifest_version") != "1.0.0":
-        errors.append(f"unsupported manifest_version: {manifest.get('manifest_version')!r}")
+    if manifest.get("manifest_version") != EXPECTED_MANIFEST_VERSION:
+        errors.append(
+            f"unsupported manifest_version: {manifest.get('manifest_version')!r} "
+            f"(expected {EXPECTED_MANIFEST_VERSION!r})"
+        )
 
     source = manifest.get("source")
     if not isinstance(source, dict):
@@ -66,7 +83,9 @@ def validate_manifest(vendor_dir: Path) -> list[str]:
 
     names = set(files)
     if names != REQUIRED_FILES:
-        errors.append("manifest files must be exactly: " + ", ".join(sorted(REQUIRED_FILES)))
+        missing = ", ".join(sorted(REQUIRED_FILES - names)) or "none"
+        extra = ", ".join(sorted(names - REQUIRED_FILES)) or "none"
+        errors.append(f"manifest files mismatch; missing: {missing}; unexpected: {extra}")
 
     for name in sorted(REQUIRED_FILES):
         metadata = files.get(name)
@@ -93,25 +112,50 @@ def validate_manifest(vendor_dir: Path) -> list[str]:
         if actual_size != expected_size:
             errors.append(f"{name}: size mismatch; expected {expected_size}, got {actual_size}")
 
-    validator = vendor_dir / "validate_contract.py"
-    if validator.is_file():
-        text = validator.read_text(encoding="utf-8")
-        adapted = "from _vendor_loop_schemas.models import Contract"
-        original = "from loop_schemas.models import Contract"
-        if adapted not in text:
-            errors.append("validate_contract.py: vendored package import is missing")
-        if original in text:
-            errors.append("validate_contract.py: source package import was not adapted")
+    # Every declared package-import adaptation must be applied: the vendored
+    # form present, the upstream form gone. Driven by the manifest so a new
+    # adaptation is covered without editing this checker.
+    adaptations = manifest.get("adaptations")
+    if not isinstance(adaptations, list):
+        errors.append("adaptations must be an array")
+    else:
+        for index, entry in enumerate(adaptations):
+            if not isinstance(entry, dict):
+                errors.append(f"adaptations[{index}]: entry must be an object")
+                continue
+            target_name = entry.get("file")
+            original = entry.get("from")
+            adapted = entry.get("to")
+            if (
+                not isinstance(target_name, str)
+                or not isinstance(original, str)
+                or not isinstance(adapted, str)
+            ):
+                errors.append(f"adaptations[{index}]: file/from/to must be strings")
+                continue
+            path = vendor_dir / target_name
+            if not path.is_file():
+                errors.append(f"{target_name}: adaptation target is missing")
+                continue
+            text = path.read_text(encoding="utf-8")
+            if adapted not in text:
+                errors.append(f"{target_name}: vendored import is missing ({adapted!r})")
+            if original in text:
+                errors.append(f"{target_name}: source import was not adapted ({original!r})")
 
-    for name in ("models.py", "validate_contract.py"):
-        path = vendor_dir / name
-        if not path.is_file() or not isinstance(version, str) or not isinstance(commit, str):
-            continue
-        text = path.read_text(encoding="utf-8")
-        if f"# Version: {version}" not in text:
-            errors.append(f"{name}: provenance version header is missing")
-        if f"# Commit: {commit}" not in text:
-            errors.append(f"{name}: provenance commit header is missing")
+    # Provenance headers on every vendored Python source.
+    if isinstance(version, str) and isinstance(commit, str):
+        for name in sorted(REQUIRED_FILES):
+            if not name.endswith(".py"):
+                continue
+            path = vendor_dir / name
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            if f"# Version: {version}" not in text:
+                errors.append(f"{name}: provenance version header is missing")
+            if f"# Commit: {commit}" not in text:
+                errors.append(f"{name}: provenance commit header is missing")
 
     return errors
 

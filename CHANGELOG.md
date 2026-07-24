@@ -9,6 +9,28 @@ of this service. `0.2.0` is the first version that reflects what the service act
 
 ## Unreleased
 
+## [0.4.0] - 2026-07-23
+
+### Changed
+
+- Re-vendored `engineering-loop-schemas` from `0.1.2` to `0.3.0`
+  (commit `5340d491b46f4fabc967c81bb3e5204104b6b5d8`) under
+  `scripts/_vendor_loop_schemas/`. Evidence and verdict wire formats advance to
+  `2.0.0` (breaking); the bundle now ships the stdlib structural evaluator
+  (`_stdlib_jsonschema.py`), the installed-schema loader (`schema_resources.py`),
+  and the four canonical JSON Schemas.
+- `scripts/validate_loop_schema_vendor.py` now enforces manifest version `2.0.0`,
+  the expanded required-file set (including `schemas/*.json`), every declared
+  package-import adaptation, and provenance headers on all vendored Python
+  sources.
+
+### Security
+
+- `validate()` in the vendored bundle now enforces the canonical contract JSON
+  Schema instead of relying on dataclass construction, closing acceptance gaps
+  for unknown properties, invalid enums, wrong types, and empty or duplicate
+  collections.
+
 ## [0.3.0] - 2026-07-23
 
 ### Added
