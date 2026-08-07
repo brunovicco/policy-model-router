@@ -66,9 +66,11 @@ from policy_model_router.runtime_authorization import (
     RuntimeAuthorizationError,
     RuntimeAuthorizationVerifier,
 )
+from policy_model_router.runtime_violation import build_runtime_violation
 
 _SERVICE_NAME = "policy-model-router"
 P1_3_RUNTIME_AUTHORIZATION_ENFORCEMENT = True
+P1_4_RUNTIME_VIOLATION_EVENTS = True
 _MAX_CORRELATION_ID_LENGTH = 200
 
 ROUTE_DECISIONS_TOTAL = Counter(
@@ -95,6 +97,11 @@ RUNTIME_AUTHORIZATION_TOTAL = Counter(
     "policy_model_router_runtime_authorization_total",
     "Runtime authorization checks labeled by bounded outcome.",
     ["outcome"],
+)
+RUNTIME_VIOLATIONS_TOTAL = Counter(
+    "policy_model_router_runtime_violations_total",
+    "Fail-closed runtime violations labeled by bounded category and reason code.",
+    ["category", "code"],
 )
 
 logger = structlog.get_logger(__name__)
@@ -324,6 +331,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.api_keys = _required_api_keys()
     app.state.max_request_body_bytes = settings.max_request_body_bytes
+    app.state.service_version = service_version
+    app.state.environment = settings.app_env
 
     runtime_authorization_settings = RuntimeAuthorizationSettings()
     runtime_authorization_verifier = build_runtime_authorization_verifier(
@@ -409,6 +418,7 @@ async def _bind_correlation_id(
         else str(uuid.uuid4())
     )
     bind_correlation_id(correlation_id)
+    request.state.correlation_id = correlation_id
     try:
         response = await call_next(request)
         response.headers["X-Correlation-Id"] = correlation_id
@@ -503,12 +513,54 @@ async def _handle_rate_limit_exceeded(
 
 @app.exception_handler(RuntimeAuthorizationError)
 async def _handle_runtime_authorization_error(
-    _request: Request,
+    request: Request,
     exc: RuntimeAuthorizationError,
 ) -> JSONResponse:
-    """Map a fail-closed authorization denial to a stable 403 envelope."""
+    """Return digest-bound evidence with each runtime authorization denial."""
     RUNTIME_AUTHORIZATION_TOTAL.labels(outcome="denied").inc()
-    return _error_response(403, exc.code, "runtime authorization denied")
+    route_request = getattr(request.state, "runtime_violation_route_request", None)
+    if route_request is None:
+        return _error_response(403, exc.code, "runtime authorization denied")
+
+    violation = build_runtime_violation(
+        code=exc.code,
+        request=route_request,
+        authorization=getattr(request.state, "runtime_violation_authorization", None),
+        authorization_verified=getattr(
+            request.state, "runtime_violation_authorization_verified", False
+        ),
+        correlation_id=getattr(request.state, "correlation_id", "unbound-request"),
+        service_version=request.app.state.service_version,
+        environment=request.app.state.environment,
+        selected_model_group=getattr(request.state, "runtime_violation_selected_model_group", None),
+    )
+    event = violation.event
+    RUNTIME_VIOLATIONS_TOTAL.labels(category=event.category.value, code=event.code).inc()
+    logger.warning(
+        "runtime_violation",
+        violation_event_id=str(event.event_id),
+        violation_category=event.category.value,
+        reason_code=event.code,
+        correlation_id=event.correlation_id,
+        authorization_state=event.authorization.state.value,
+        authorization_id=(
+            str(event.authorization.authorization_id)
+            if event.authorization.authorization_id is not None
+            else None
+        ),
+        selected_model_group=event.selected_model_group,
+        violation_digest=violation.event_digest,
+    )
+    return JSONResponse(
+        status_code=403,
+        content={
+            "error": {
+                "code": exc.code,
+                "message": "runtime authorization denied",
+            },
+            "violation": violation.model_dump(mode="json"),
+        },
+    )
 
 
 @app.get("/health")
@@ -552,6 +604,10 @@ async def route(
     authorization = (
         request.authorization if isinstance(request, AuthorizedModelRouteRequest) else None
     )
+    http_request.state.runtime_violation_route_request = route_request
+    http_request.state.runtime_violation_authorization = authorization
+    http_request.state.runtime_violation_authorization_verified = False
+    http_request.state.runtime_violation_selected_model_group = None
     client_host = http_request.client.host if http_request.client else "unknown"
 
     rate_limit_key = f"{client_host}:{route_request.agent_name}"
@@ -587,6 +643,7 @@ async def route(
             route_request,
             now=SystemClock().now(),
         )
+        http_request.state.runtime_violation_authorization_verified = True
         RUNTIME_AUTHORIZATION_TOTAL.labels(outcome="verified").inc()
     elif authorization is not None:
         raise RuntimeAuthorizationError(
@@ -622,6 +679,9 @@ async def route(
         ROUTE_DURATION_SECONDS.labels(workload=workload).observe(time.monotonic() - started_at)
 
     if verified_authorization is not None:
+        http_request.state.runtime_violation_selected_model_group = (
+            decision.selected_model_group.value
+        )
         verifier.require_selected_model(
             verified_authorization,
             decision.selected_model_group,
