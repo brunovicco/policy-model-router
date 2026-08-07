@@ -1,0 +1,29 @@
+{
+  "event": {
+    "authorization": {
+      "authorization_id": "55555555-5555-4555-8555-555555555555",
+      "key_id": "gov-ed25519-2026-08",
+      "scope_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "signing_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "state": "verified"
+    },
+    "category": "model_scope",
+    "code": "selected_model_group_not_authorized",
+    "correlation_id": "55555555-5555-4555-8555-555555555555",
+    "enforcement_action": "blocked",
+    "environment": "production",
+    "event_id": "66666666-6666-4666-8666-666666666666",
+    "occurred_at": "2026-08-07T20:30:00Z",
+    "request": {
+      "agent_name": "Agente de Parecer de Crédito PJ",
+      "task_id": "draft-opinion",
+      "workflow_id": "credit-analysis-2026-001",
+      "workload": "opinion_drafting"
+    },
+    "schema_version": "1.0",
+    "selected_model_group": "reasoning-medium",
+    "service_version": "0.4.0",
+    "source_service": "policy-model-router"
+  },
+  "event_digest": "0c3d28c524625df31b9082d64cfb915d2f2ca9fc99dcf281d35a545b33826873"
+}
