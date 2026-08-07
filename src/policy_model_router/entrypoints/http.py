@@ -43,8 +43,9 @@ from policy_model_router.application.route_model import (
 )
 from policy_model_router.domain.routing import NoViableModelGroupError
 from policy_model_router.entrypoints.contracts import (
+    AuthorizedModelRouteRequest,
     ModelRouteDecision,
-    ModelRouteRequest,
+    RouteRequestEnvelope,
     from_domain_decision,
     from_domain_rejection,
     to_domain_request,
@@ -54,9 +55,20 @@ from policy_model_router.entrypoints.logging import (
     clear_request_context,
     configure_logging,
 )
+from policy_model_router.entrypoints.runtime_authorization_factory import (
+    build_runtime_authorization_verifier,
+)
+from policy_model_router.entrypoints.runtime_authorization_settings import (
+    RuntimeAuthorizationSettings,
+)
 from policy_model_router.entrypoints.settings import Settings
+from policy_model_router.runtime_authorization import (
+    RuntimeAuthorizationError,
+    RuntimeAuthorizationVerifier,
+)
 
 _SERVICE_NAME = "policy-model-router"
+P1_3_RUNTIME_AUTHORIZATION_ENFORCEMENT = True
 _MAX_CORRELATION_ID_LENGTH = 200
 
 ROUTE_DECISIONS_TOTAL = Counter(
@@ -78,6 +90,11 @@ RATE_LIMIT_DECISIONS_TOTAL = Counter(
     "policy_model_router_rate_limit_decisions_total",
     "Rate limiter admit/block decisions, labeled by tier (per_ip, per_agent) and outcome.",
     ["tier", "outcome"],
+)
+RUNTIME_AUTHORIZATION_TOTAL = Counter(
+    "policy_model_router_runtime_authorization_total",
+    "Runtime authorization checks labeled by bounded outcome.",
+    ["outcome"],
 )
 
 logger = structlog.get_logger(__name__)
@@ -308,6 +325,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.api_keys = _required_api_keys()
     app.state.max_request_body_bytes = settings.max_request_body_bytes
 
+    runtime_authorization_settings = RuntimeAuthorizationSettings()
+    runtime_authorization_verifier = build_runtime_authorization_verifier(
+        runtime_authorization_settings,
+        app_env=settings.app_env,
+        redis_url=settings.redis_url,
+    )
+    await runtime_authorization_verifier.ping()
+    app.state.runtime_authorization_settings = runtime_authorization_settings
+    app.state.runtime_authorization_verifier = runtime_authorization_verifier
+
     fingerprint_secret = (
         settings.rate_limit_fingerprint_secret.encode()
         if settings.rate_limit_fingerprint_secret
@@ -337,7 +364,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    await asyncio.gather(rate_limiter.close(), ip_rate_limiter.close(), return_exceptions=True)
+    await asyncio.gather(
+        rate_limiter.close(),
+        ip_rate_limiter.close(),
+        runtime_authorization_verifier.close(),
+        return_exceptions=True,
+    )
 
 
 _docs_enabled = _api_docs_enabled()
@@ -469,6 +501,16 @@ async def _handle_rate_limit_exceeded(
     return _error_response(429, "rate_limit_exceeded", "too many requests, try again later")
 
 
+@app.exception_handler(RuntimeAuthorizationError)
+async def _handle_runtime_authorization_error(
+    _request: Request,
+    exc: RuntimeAuthorizationError,
+) -> JSONResponse:
+    """Map a fail-closed authorization denial to a stable 403 envelope."""
+    RUNTIME_AUTHORIZATION_TOTAL.labels(outcome="denied").inc()
+    return _error_response(403, exc.code, "runtime authorization denied")
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Liveness probe: always returns 200 once the process is serving requests."""
@@ -500,19 +542,19 @@ async def metrics() -> Response:
 
 @app.post("/route", response_model=ModelRouteDecision)
 async def route(
-    request: ModelRouteRequest,
+    request: RouteRequestEnvelope,
     http_request: Request,
     use_case: Annotated[RouteModelUseCase, Depends(get_route_model_use_case)],
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> ModelRouteDecision:
-    """Evaluate one model-routing request and return the resulting decision record.
-
-    The per-IP rate-limit tier runs earlier, in ``_BodySizeAndIpRateLimitMiddleware`` - before
-    this handler is even reached - so a request that gets this far has already passed it (ADR-0011).
-    """
+    """Evaluate one request only inside its signed Governance runtime scope."""
+    route_request = request.request if isinstance(request, AuthorizedModelRouteRequest) else request
+    authorization = (
+        request.authorization if isinstance(request, AuthorizedModelRouteRequest) else None
+    )
     client_host = http_request.client.host if http_request.client else "unknown"
 
-    rate_limit_key = f"{client_host}:{request.agent_name}"
+    rate_limit_key = f"{client_host}:{route_request.agent_name}"
     agent_allowed = await http_request.app.state.rate_limiter.allow(rate_limit_key)
     RATE_LIMIT_DECISIONS_TOTAL.labels(
         tier="per_agent", outcome="allowed" if agent_allowed else "blocked"
@@ -520,12 +562,44 @@ async def route(
     if not agent_allowed:
         raise RateLimitExceededError(f"rate limit exceeded for {rate_limit_key!r}")
 
-    _authenticate(x_api_key, request.agent_name, http_request.app.state.api_keys)
+    _authenticate(
+        x_api_key,
+        route_request.agent_name,
+        http_request.app.state.api_keys,
+    )
 
-    workload = request.workload.value
+    runtime_settings = http_request.app.state.runtime_authorization_settings
+    verified_authorization = None
+    if runtime_settings.required:
+        if authorization is None:
+            raise RuntimeAuthorizationError(
+                "runtime_authorization_required",
+                "Signed Governance runtime authorization is required",
+            )
+        verifier = http_request.app.state.runtime_authorization_verifier
+        if not isinstance(verifier, RuntimeAuthorizationVerifier):
+            raise RuntimeAuthorizationError(
+                "runtime_authorization_unavailable",
+                "Runtime authorization verifier is unavailable",
+            )
+        verified_authorization = await verifier.verify(
+            authorization,
+            route_request,
+            now=SystemClock().now(),
+        )
+        RUNTIME_AUTHORIZATION_TOTAL.labels(outcome="verified").inc()
+    elif authorization is not None:
+        raise RuntimeAuthorizationError(
+            "runtime_authorization_not_configured",
+            "Runtime authorization is disabled for this deployment",
+        )
+    else:
+        RUNTIME_AUTHORIZATION_TOTAL.labels(outcome="legacy_dev").inc()
+
+    workload = route_request.workload.value
     started_at = time.monotonic()
     try:
-        decision = await use_case.route(to_domain_request(request))
+        decision = await use_case.route(to_domain_request(route_request))
     except NoViableModelGroupError as exc:
         ROUTE_REJECTIONS_TOTAL.labels(workload=workload, outcome="no_viable_model_group").inc()
         logger.info(
@@ -546,6 +620,12 @@ async def route(
         raise
     finally:
         ROUTE_DURATION_SECONDS.labels(workload=workload).observe(time.monotonic() - started_at)
+
+    if verified_authorization is not None:
+        verifier.require_selected_model(
+            verified_authorization,
+            decision.selected_model_group,
+        )
 
     ROUTE_DECISIONS_TOTAL.labels(
         workload=workload, model_group=decision.selected_model_group.value

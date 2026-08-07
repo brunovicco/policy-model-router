@@ -29,6 +29,9 @@ from policy_model_router.domain.enums import (
 from policy_model_router.domain.routing import RejectedDecision as DomainRejectedDecision
 from policy_model_router.domain.routing import RouteDecision as DomainRouteDecision
 from policy_model_router.domain.routing import RouteRequest as DomainRouteRequest
+from policy_model_router.runtime_authorization_contract import (
+    SignedRuntimeAuthorization,
+)
 
 
 def _require_utc(value: datetime) -> datetime:
@@ -75,6 +78,16 @@ class ModelRouteRequest(StrictContract):
     structured_output_required: bool
     max_latency_ms: Annotated[int, Field(gt=0)]
     max_cost_usd: Annotated[Decimal, Field(gt=0)]
+
+
+class AuthorizedModelRouteRequest(StrictContract):
+    """P1.3 route body carrying the request plus Governance authorization."""
+
+    request: ModelRouteRequest
+    authorization: SignedRuntimeAuthorization
+
+
+RouteRequestEnvelope = ModelRouteRequest | AuthorizedModelRouteRequest
 
 
 class RejectedCandidate(StrictContract):
@@ -201,10 +214,12 @@ def from_domain_rejection(decision: DomainRejectedDecision) -> RouteRejection:
 
 
 __all__ = [
+    "AuthorizedModelRouteRequest",
     "ModelRouteDecision",
     "ModelRouteRequest",
     "RejectedCandidate",
     "RouteRejection",
+    "RouteRequestEnvelope",
     "StrictContract",
     "UtcDatetime",
     "from_domain_decision",
