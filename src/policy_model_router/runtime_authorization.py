@@ -22,6 +22,10 @@ from policy_model_router.runtime_authorization_contract import (
     RuntimeAuthorizationClaims,
     SignedRuntimeAuthorization,
 )
+from policy_model_router.runtime_control import (
+    RuntimeControlEnforcementError,
+    RuntimeControlEnforcer,
+)
 
 
 class RuntimeAuthorizationKeyStatus(StrEnum):
@@ -35,10 +39,17 @@ class RuntimeAuthorizationKeyStatus(StrEnum):
 class RuntimeAuthorizationError(RuntimeError):
     """Fail-closed runtime authorization error with a stable code."""
 
-    def __init__(self, code: str, message: str) -> None:
-        """Store the stable machine-readable ``code`` alongside the human ``message``."""
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        authorization_verified: bool = False,
+    ) -> None:
+        """Store the stable code and whether cryptographic/binding verification completed."""
         super().__init__(message)
         self.code = code
+        self.authorization_verified = authorization_verified
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +214,7 @@ class RuntimeAuthorizationVerifier:
         expected_control_catalog_id: str,
         expected_control_catalog_version: str,
         expected_control_catalog_digest: str,
+        runtime_control: RuntimeControlEnforcer | None = None,
         clock_skew_seconds: int = 0,
     ) -> None:
         """Bind the trust set, replay guard, and expected Governance provenance to verify."""
@@ -223,6 +235,7 @@ class RuntimeAuthorizationVerifier:
         self._expected_control_catalog_id = expected_control_catalog_id
         self._expected_control_catalog_version = expected_control_catalog_version
         self._expected_control_catalog_digest = expected_control_catalog_digest
+        self._runtime_control = runtime_control
         self._clock_skew = timedelta(seconds=clock_skew_seconds)
 
     async def verify(
@@ -241,6 +254,19 @@ class RuntimeAuthorizationVerifier:
         self._verify_request_binding(claims, request)
         self._verify_agent_binding(claims, request.agent_name)
         self._verify_policy_provenance(claims)
+
+        if self._runtime_control is not None:
+            try:
+                await self._runtime_control.enforce(
+                    agent_id=claims.subject.agent_id,
+                    agent_version=claims.subject.agent_version,
+                )
+            except RuntimeControlEnforcementError as exc:
+                raise RuntimeAuthorizationError(
+                    exc.code,
+                    str(exc),
+                    authorization_verified=True,
+                ) from exc
 
         try:
             fresh = await self._replay_guard.consume(
@@ -292,12 +318,19 @@ class RuntimeAuthorizationVerifier:
             )
 
     async def ping(self) -> None:
-        """Require replay state to be reachable."""
+        """Require replay and Runtime Control state to be reachable."""
         await self._replay_guard.ping()
+        if self._runtime_control is not None:
+            try:
+                await self._runtime_control.ping()
+            except RuntimeControlEnforcementError as exc:
+                raise RuntimeAuthorizationError(exc.code, str(exc)) from exc
 
     async def close(self) -> None:
-        """Release replay resources."""
+        """Release replay and Runtime Control resources."""
         await self._replay_guard.close()
+        if self._runtime_control is not None:
+            await self._runtime_control.close()
 
     def _verify_identity_and_time(
         self,
