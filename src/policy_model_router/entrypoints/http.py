@@ -25,9 +25,11 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated, Protocol
 
 import structlog
+from a2a_otel_kit import Observability, ObservabilitySettings, continue_trace
 from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from opentelemetry.trace import SpanKind
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -53,7 +55,6 @@ from policy_model_router.entrypoints.contracts import (
 from policy_model_router.entrypoints.logging import (
     bind_correlation_id,
     clear_request_context,
-    configure_logging,
 )
 from policy_model_router.entrypoints.runtime_authorization_factory import (
     build_runtime_authorization_verifier,
@@ -71,6 +72,7 @@ from policy_model_router.runtime_violation import build_runtime_violation
 _SERVICE_NAME = "policy-model-router"
 P1_3_RUNTIME_AUTHORIZATION_ENFORCEMENT = True
 P1_4_RUNTIME_VIOLATION_EVENTS = True
+P1_5_DISTRIBUTED_RUNTIME_TRACING = True
 _MAX_CORRELATION_ID_LENGTH = 200
 
 ROUTE_DECISIONS_TOTAL = Counter(
@@ -312,13 +314,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     settings = Settings()
     service_version = _service_version()
-    configure_logging(
-        service=_SERVICE_NAME,
-        environment=settings.app_env,
-        version=service_version,
-        level=settings.log_level,
-        json_format=settings.log_format.strip().lower() != "console",
+    observability = Observability.configure(
+        ObservabilitySettings(
+            service_name=_SERVICE_NAME,
+            service_version=service_version,
+            environment=settings.app_env,
+            log_level=settings.log_level,
+            log_format=settings.log_format,
+        )
     )
+    app.state.observability = observability
 
     policy = load_routing_policy(settings.routing_policy_path)
     app.state.route_model_use_case = RouteModelUseCase(
@@ -379,6 +384,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime_authorization_verifier.close(),
         return_exceptions=True,
     )
+    observability.shutdown()
 
 
 _docs_enabled = _api_docs_enabled()
@@ -417,14 +423,37 @@ async def _bind_correlation_id(
         if raw_correlation_id and len(raw_correlation_id) <= _MAX_CORRELATION_ID_LENGTH
         else str(uuid.uuid4())
     )
-    bind_correlation_id(correlation_id)
-    request.state.correlation_id = correlation_id
-    try:
-        response = await call_next(request)
-        response.headers["X-Correlation-Id"] = correlation_id
-        return response
-    finally:
-        clear_request_context()
+    with (
+        continue_trace(dict(request.headers)),
+        request.app.state.observability.start_span(
+            "policy_model_router.http.request",
+            kind=SpanKind.SERVER,
+            attributes={
+                "component": "fastapi",
+                "operation": "http.request",
+                "correlation_id": correlation_id,
+                "http.method": request.method,
+            },
+            record_exception=False,
+        ) as span,
+    ):
+        bind_correlation_id(correlation_id)
+        request.state.correlation_id = correlation_id
+        try:
+            response = await call_next(request)
+            response.headers["X-Correlation-Id"] = correlation_id
+            span.set_attribute("http.status_code", response.status_code)
+            span.set_attribute(
+                "outcome",
+                "success" if response.status_code < 500 else "error",
+            )
+            return response
+        except Exception as exc:
+            span.set_attribute("outcome", "error")
+            span.set_attribute("error.type", type(exc).__name__)
+            raise
+        finally:
+            clear_request_context()
 
 
 def get_route_model_use_case(request: Request) -> RouteModelUseCase:

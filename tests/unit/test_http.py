@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import structlog.contextvars
+from a2a_otel_kit import ObservabilitySettings
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
@@ -54,9 +55,20 @@ def _valid_payload(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
-def test_startup_configures_structured_logging(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, str]] = []
-    monkeypatch.setattr(http_module, "configure_logging", lambda **kwargs: calls.append(kwargs))
+def test_startup_configures_observability(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings_calls: list[ObservabilitySettings] = []
+
+    class FakeObservability:
+        def shutdown(self) -> None:
+            pass
+
+    class FakeObservabilityFactory:
+        @staticmethod
+        def configure(settings: ObservabilitySettings) -> FakeObservability:
+            settings_calls.append(settings)
+            return FakeObservability()
+
+    monkeypatch.setattr(http_module, "Observability", FakeObservabilityFactory)
     monkeypatch.setenv("ROUTING_POLICY_PATH", str(_SHIPPED_POLICY_PATH))
     monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
     monkeypatch.delenv("REDIS_URL", raising=False)
@@ -64,10 +76,11 @@ def test_startup_configures_structured_logging(monkeypatch: pytest.MonkeyPatch) 
     with TestClient(app):
         pass
 
-    assert len(calls) == 1
-    assert calls[0]["service"] == "policy-model-router"
-    assert calls[0]["environment"]
-    assert calls[0]["version"]
+    assert len(settings_calls) == 1
+    settings = settings_calls[0]
+    assert settings.service_name == "policy-model-router"
+    assert settings.environment
+    assert settings.service_version
 
 
 def test_startup_fails_closed_when_api_keys_is_not_configured(
