@@ -62,6 +62,7 @@ from policy_model_router.entrypoints.runtime_authorization_factory import (
 from policy_model_router.entrypoints.runtime_authorization_settings import (
     RuntimeAuthorizationSettings,
 )
+from policy_model_router.entrypoints.runtime_control_settings import RuntimeControlSettings
 from policy_model_router.entrypoints.settings import Settings
 from policy_model_router.runtime_authorization import (
     RuntimeAuthorizationError,
@@ -73,6 +74,7 @@ _SERVICE_NAME = "policy-model-router"
 P1_3_RUNTIME_AUTHORIZATION_ENFORCEMENT = True
 P1_4_RUNTIME_VIOLATION_EVENTS = True
 P1_5_DISTRIBUTED_RUNTIME_TRACING = True
+P1_6_RUNTIME_KILL_SWITCH_ENFORCEMENT = True
 _MAX_CORRELATION_ID_LENGTH = 200
 
 ROUTE_DECISIONS_TOTAL = Counter(
@@ -340,13 +342,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.environment = settings.app_env
 
     runtime_authorization_settings = RuntimeAuthorizationSettings()
+    runtime_control_settings = RuntimeControlSettings()
     runtime_authorization_verifier = build_runtime_authorization_verifier(
         runtime_authorization_settings,
         app_env=settings.app_env,
         redis_url=settings.redis_url,
+        runtime_control_settings=runtime_control_settings,
     )
     await runtime_authorization_verifier.ping()
     app.state.runtime_authorization_settings = runtime_authorization_settings
+    app.state.runtime_control_settings = runtime_control_settings
     app.state.runtime_authorization_verifier = runtime_authorization_verifier
 
     fingerprint_secret = (
@@ -555,8 +560,9 @@ async def _handle_runtime_authorization_error(
         code=exc.code,
         request=route_request,
         authorization=getattr(request.state, "runtime_violation_authorization", None),
-        authorization_verified=getattr(
-            request.state, "runtime_violation_authorization_verified", False
+        authorization_verified=(
+            getattr(request.state, "runtime_violation_authorization_verified", False)
+            or exc.authorization_verified
         ),
         correlation_id=getattr(request.state, "correlation_id", "unbound-request"),
         service_version=request.app.state.service_version,
