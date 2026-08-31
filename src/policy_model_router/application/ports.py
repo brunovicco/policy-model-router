@@ -1,14 +1,13 @@
 """Application-owned ports implemented by adapters.
 
 Kept as narrow Protocols so tests can inject deterministic fakes instead of real time/identifier
-sources, per ``.claude/rules/testing.md`` ("Unit tests isolate ... clock, randomness,
-identifiers").
+sources.
 """
 
 from datetime import datetime
 from typing import Protocol
 
-from policy_model_router.domain.enums import ModelGroup
+from policy_model_router.domain.identifiers import ModelGroupId
 
 
 class Clock(Protocol):
@@ -28,20 +27,10 @@ class IdGenerator(Protocol):
 
 
 class AvailabilityProvider(Protocol):
-    """Port for resolving a model group's effective availability at decision time.
+    """Port for resolving a model group's effective availability at decision time."""
 
-    Async (ADR-0006's amendment) so a future live provider/gateway health check can await a
-    network call without blocking the event loop or every other concurrent ``/route`` request.
-    No implementation shipped today calls out over the network; :class:`StaticAvailabilityProvider`
-    awaits nothing and returns immediately.
-    """
-
-    async def is_available(self, model_group: ModelGroup, declared_available: bool) -> bool:
-        """Return whether ``model_group`` is available, given its policy-declared default.
-
-        Args:
-            model_group: The model group being evaluated.
-            declared_available: The ``available`` flag from the loaded routing policy for this
-                group, i.e. the static fallback signal.
-        """
+    async def is_available(
+        self, model_group: ModelGroupId, declared_available: bool
+    ) -> bool:
+        """Return whether ``model_group`` is available given its policy-declared default."""
         ...

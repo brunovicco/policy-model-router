@@ -1,8 +1,8 @@
-"""Loads the declarative routing policy from a versioned YAML file.
+"""Load and validate the declarative routing policy from versioned YAML.
 
-Fails closed: any structural problem (missing file, malformed YAML, unknown or missing keys,
-incomplete catalog/workload coverage) raises :class:`RoutingPolicyLoadError` rather than falling
-back to a partial or default policy.
+Workload and logical model-group names are policy-defined validated identifiers. The loader fails
+closed on malformed structure, invalid identifiers, duplicate keys, empty catalogs, or references
+to model groups that are not declared in the same policy.
 """
 
 import hashlib
@@ -14,23 +14,23 @@ from typing import Annotated, Literal
 
 import pydantic
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidateAs, model_validator
 
 from policy_model_router.domain.catalog import ModelGroupProfile, RoutingPolicy, WorkloadRule
-from policy_model_router.domain.enums import DataClassification, ModelGroup, RiskLevel, Workload
+from policy_model_router.domain.enums import DataClassification, RiskLevel
+from policy_model_router.domain.identifiers import (
+    POLICY_IDENTIFIER_PATTERN,
+    ModelGroupId,
+    WorkloadId,
+)
 
 
 class RoutingPolicyLoadError(RuntimeError):
-    """Raised when the routing policy file cannot be read into a valid ``RoutingPolicy``."""
+    """Raised when a routing policy cannot be read into a valid fail-closed domain policy."""
 
 
 class _NoDuplicateKeysLoader(yaml.SafeLoader):
-    """``SafeLoader`` that fails on a duplicate mapping key instead of the default silent overwrite.
-
-    Stock PyYAML lets a second ``policy_version:`` (or any other repeated key) silently replace the
-    first without a warning; that would let a copy-paste mistake in the policy file change routing
-    behavior with no error at load time.
-    """
+    """SafeLoader that rejects duplicate mapping keys instead of silently overwriting them."""
 
     def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[object, object]:
         seen: set[object] = set()
@@ -45,6 +45,14 @@ class _NoDuplicateKeysLoader(yaml.SafeLoader):
                 )
             seen.add(key)
         return super().construct_mapping(node, deep=deep)
+
+
+_IdentifierText = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=128, pattern=POLICY_IDENTIFIER_PATTERN),
+]
+_ModelGroupField = Annotated[ModelGroupId, ValidateAs(_IdentifierText, ModelGroupId)]
+_WorkloadField = Annotated[WorkloadId, ValidateAs(_IdentifierText, WorkloadId)]
 
 
 class _ModelGroupProfileConfig(BaseModel):
@@ -65,11 +73,11 @@ class _ModelGroupProfileConfig(BaseModel):
 
 
 class _WorkloadRuleConfig(BaseModel):
-    """Validated YAML shape of one workload's routing rule."""
+    """Validated YAML shape of one policy-defined workload rule."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model_group: ModelGroup
+    model_group: _ModelGroupField
     requires_tool_calling: bool
 
 
@@ -81,25 +89,31 @@ class _RoutingPolicyConfig(BaseModel):
     schema_version: Literal["1.0"]
     policy_id: Annotated[str, Field(min_length=1)]
     policy_version: Annotated[str, Field(min_length=1)]
-    model_groups: dict[ModelGroup, _ModelGroupProfileConfig]
-    workloads: dict[Workload, _WorkloadRuleConfig]
+    model_groups: Annotated[dict[_ModelGroupField, _ModelGroupProfileConfig], Field(min_length=1)]
+    workloads: Annotated[dict[_WorkloadField, _WorkloadRuleConfig], Field(min_length=1)]
 
     @model_validator(mode="after")
-    def _require_full_coverage(self) -> "_RoutingPolicyConfig":
-        """Require every declared model group and workload to be covered."""
-        missing_groups = set(ModelGroup) - self.model_groups.keys()
-        if missing_groups:
-            names = ", ".join(sorted(group.value for group in missing_groups))
-            raise ValueError(f"model_groups is missing required entries: {names}")
-        missing_workloads = set(Workload) - self.workloads.keys()
-        if missing_workloads:
-            names = ", ".join(sorted(workload.value for workload in missing_workloads))
-            raise ValueError(f"workloads is missing required entries: {names}")
+    def _require_referential_integrity(self) -> "_RoutingPolicyConfig":
+        """Require every workload mapping to reference a model group declared in this policy."""
+        undefined = {
+            rule.model_group
+            for rule in self.workloads.values()
+            if rule.model_group not in self.model_groups
+        }
+        if undefined:
+            names = ", ".join(sorted(group.value for group in undefined))
+            raise ValueError(f"workloads reference undefined model groups: {names}")
+
+        referenced = {rule.model_group for rule in self.workloads.values()}
+        unreferenced = set(self.model_groups) - referenced
+        if unreferenced:
+            names = ", ".join(sorted(group.value for group in unreferenced))
+            raise ValueError(f"model_groups contains unreachable entries: {names}")
         return self
 
 
 def _to_domain(config: _RoutingPolicyConfig, *, policy_digest: str) -> RoutingPolicy:
-    model_groups: Mapping[ModelGroup, ModelGroupProfile] = types.MappingProxyType(
+    model_groups: Mapping[ModelGroupId, ModelGroupProfile] = types.MappingProxyType(
         {
             group: ModelGroupProfile(
                 authorized_data_classifications=frozenset(profile.authorized_data_classifications),
@@ -116,7 +130,7 @@ def _to_domain(config: _RoutingPolicyConfig, *, policy_digest: str) -> RoutingPo
             for group, profile in config.model_groups.items()
         }
     )
-    workloads: Mapping[Workload, WorkloadRule] = types.MappingProxyType(
+    workloads: Mapping[WorkloadId, WorkloadRule] = types.MappingProxyType(
         {
             workload: WorkloadRule(
                 model_group=rule.model_group,
@@ -136,23 +150,15 @@ def _to_domain(config: _RoutingPolicyConfig, *, policy_digest: str) -> RoutingPo
 
 
 def load_routing_policy(path: Path) -> RoutingPolicy:
-    """Read, validate, and convert the routing policy YAML file at ``path``.
-
-    Raises:
-        RoutingPolicyLoadError: If the file is missing or unreadable, the YAML is malformed, the
-            structure doesn't match the expected schema, or the catalog/workload table is
-            incomplete.
-    """
+    """Read, validate, and convert the routing policy YAML file at ``path``."""
     try:
         raw_text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RoutingPolicyLoadError(f"cannot read routing policy file {path}: {exc}") from exc
 
     try:
-        # Ruff S506 / Bandit B506: false positive - _NoDuplicateKeysLoader subclasses SafeLoader and
-        # adds no unsafe constructors; it only rejects duplicate mapping keys before delegating to
-        # the safe ones. Neither linter can verify a custom Loader's safety statically, so both
-        # always flag any yaml.load() call regardless of the Loader argument's actual behavior.
+        # _NoDuplicateKeysLoader subclasses SafeLoader and adds no unsafe constructors; it only
+        # rejects duplicate mapping keys. Static scanners cannot infer that custom-loader property.
         raw_data = yaml.load(raw_text, Loader=_NoDuplicateKeysLoader)  # noqa: S506  # nosec B506
     except yaml.YAMLError as exc:
         raise RoutingPolicyLoadError(
@@ -167,5 +173,4 @@ def load_routing_policy(path: Path) -> RoutingPolicy:
         ) from exc
 
     policy_digest = f"sha256:{hashlib.sha256(raw_text.encode('utf-8')).hexdigest()}"
-
     return _to_domain(config, policy_digest=policy_digest)

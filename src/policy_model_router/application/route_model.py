@@ -1,13 +1,8 @@
-"""The model-routing use case: ADR-0005's two-step deterministic algorithm.
+"""The model-routing use case: ADR-0005's deterministic policy algorithm.
 
-1. Every model group in the policy's catalog is checked against the request's workload rule,
-   running the eliminatory constraints from :mod:`policy_model_router.domain.constraints` in
-   order; a candidate is rejected at the first constraint it fails.
-2. The workload's mapped model group (from the declarative table) is selected if it survived
-   step 1. Every other candidate becomes a rejected candidate with a reason - either the
-   constraint that eliminated it, or, if it passed every constraint, the fact that the workload
-   simply maps elsewhere. If the mapped group itself was eliminated, routing fails outright: the
-   MVP has no weighted-score fallback (that is Phase 3).
+Every model group declared by the active policy is evaluated against ordered hard constraints. The
+workload's policy-mapped group is selected only if it survives. Workloads and logical groups are
+policy-defined identifiers; no system-wide enum participates in this decision.
 """
 
 from dataclasses import replace
@@ -15,7 +10,8 @@ from dataclasses import replace
 from policy_model_router.application.ports import AvailabilityProvider, Clock, IdGenerator
 from policy_model_router.domain.catalog import RoutingPolicy
 from policy_model_router.domain.constraints import CONSTRAINTS, ConstraintFailure
-from policy_model_router.domain.enums import ModelGroup, ReasonCode
+from policy_model_router.domain.enums import ReasonCode
+from policy_model_router.domain.identifiers import ModelGroupId
 from policy_model_router.domain.routing import (
     NoViableModelGroupError,
     RejectedCandidate,
@@ -26,7 +22,7 @@ from policy_model_router.domain.routing import (
 
 
 class IncompleteRoutingPolicyError(Exception):
-    """Raised when the routing policy has no workload rule for a request's workload."""
+    """Fail-closed denial when the active policy does not define the requested workload."""
 
 
 class RouteModelUseCase:
@@ -42,19 +38,7 @@ class RouteModelUseCase:
         service_version: str,
         environment: str,
     ) -> None:
-        """Bind the routing policy, its ports, and the deployment identity attached to decisions.
-
-        Args:
-            policy: The declarative routing policy loaded for this environment.
-            clock: Source of the timestamp attached to each decision.
-            id_generator: Source of each decision's unique identifier.
-            availability: Resolves each model group's effective availability at decision time; see
-                ADR-0006.
-            service_version: This service's own version, attached to every decision so it is
-                traceable to the code that produced it.
-            environment: The deployment environment (e.g. ``"production"``), attached to every
-                decision for the same reason.
-        """
+        """Bind the routing policy, ports, and deployment identity attached to decisions."""
         self._policy = policy
         self._clock = clock
         self._id_generator = id_generator
@@ -63,7 +47,7 @@ class RouteModelUseCase:
         self._environment = environment
 
     async def route(self, request: RouteRequest) -> RouteDecision:
-        """Return the routing decision for one request, or raise if none can be reached."""
+        """Return the routing decision for one request, or fail closed if it is not authorized."""
         try:
             workload_rule = self._policy.workloads[request.workload]
         except KeyError as exc:
@@ -71,7 +55,7 @@ class RouteModelUseCase:
                 f"routing policy has no mapping for workload {request.workload.value!r}"
             ) from exc
 
-        rejection_reasons: dict[ModelGroup, ConstraintFailure] = {}
+        rejection_reasons: dict[ModelGroupId, ConstraintFailure] = {}
         for model_group, profile in self._policy.model_groups.items():
             effective_profile = replace(
                 profile,
@@ -107,7 +91,7 @@ class RouteModelUseCase:
                 )
             )
 
-        def _to_rejected_candidate(model_group: ModelGroup) -> RejectedCandidate:
+        def _to_rejected_candidate(model_group: ModelGroupId) -> RejectedCandidate:
             failure = rejection_reasons.get(model_group)
             if failure is not None:
                 return RejectedCandidate(

@@ -1,0 +1,70 @@
+# Legacy credit-desk policy retained as a migration/reproducibility example.
+schema_version: "1.0"
+policy_id: "credit-desk-routing"
+policy_version: "1.0.0"
+
+model_groups:
+  fast-small:
+    authorized_data_classifications: [public, internal]
+    authorized_risk_levels: [low, medium]
+    supports_structured_output: false
+    supports_tool_calling: true
+    max_context_tokens: 16000
+    typical_latency_ms: 3000
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
+    available: true
+    allowed_agents: []
+
+  reasoning-medium:
+    authorized_data_classifications: [public, internal, confidential, restricted]
+    authorized_risk_levels: [low, medium, high]
+    supports_structured_output: false
+    supports_tool_calling: true
+    max_context_tokens: 64000
+    typical_latency_ms: 15000
+    input_cost_usd_per_million_tokens: "0.50"
+    output_cost_usd_per_million_tokens: "1.50"
+    available: true
+    allowed_agents: []
+
+  reasoning-strong:
+    authorized_data_classifications: [public, internal, confidential, restricted]
+    authorized_risk_levels: [low, medium, high, critical]
+    supports_structured_output: false
+    supports_tool_calling: true
+    max_context_tokens: 128000
+    typical_latency_ms: 30000
+    input_cost_usd_per_million_tokens: "2.00"
+    output_cost_usd_per_million_tokens: "8.00"
+    available: true
+    allowed_agents: []
+
+  fast-structured-output:
+    authorized_data_classifications: [public, internal]
+    authorized_risk_levels: [low, medium]
+    supports_structured_output: true
+    supports_tool_calling: false
+    max_context_tokens: 8000
+    typical_latency_ms: 2000
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
+    available: true
+    allowed_agents: []
+
+workloads:
+  document_extraction:
+    model_group: fast-small
+    requires_tool_calling: false
+  cashflow_analysis:
+    model_group: reasoning-medium
+    requires_tool_calling: false
+  findings_correlation:
+    model_group: reasoning-strong
+    requires_tool_calling: false
+  opinion_drafting:
+    model_group: reasoning-strong
+    requires_tool_calling: false
+  json_repair:
+    model_group: fast-structured-output
+    requires_tool_calling: false
