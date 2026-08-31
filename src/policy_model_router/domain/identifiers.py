@@ -51,9 +51,7 @@ class _LegacyIdentifierMeta(type):
     def __iter__(cls) -> Iterator[PolicyIdentifier]:
         """Iterate only over compatibility constants declared directly on the identifier class."""
         return (
-            value
-            for name, value in vars(cls).items()
-            if name.isupper() and isinstance(value, cls)
+            value for name, value in vars(cls).items() if name.isupper() and isinstance(value, cls)
         )
 
 
