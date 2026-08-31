@@ -29,8 +29,6 @@ class IdGenerator(Protocol):
 class AvailabilityProvider(Protocol):
     """Port for resolving a model group's effective availability at decision time."""
 
-    async def is_available(
-        self, model_group: ModelGroupId, declared_available: bool
-    ) -> bool:
+    async def is_available(self, model_group: ModelGroupId, declared_available: bool) -> bool:
         """Return whether ``model_group`` is available given its policy-declared default."""
         ...

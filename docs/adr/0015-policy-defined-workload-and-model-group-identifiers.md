@@ -31,17 +31,25 @@ Identifiers:
 - are represented on the wire and in YAML as strings;
 - become recognized only when declared by the active routing policy.
 
+New workload identifiers are additionally namespace-qualified with at least one `.` separator. The
+five former credit-desk workloads remain valid without a namespace during the 0.x compatibility
+window. Model-group identifiers do not require namespace qualification.
+
 The domain types are `WorkloadId` and `ModelGroupId`, immutable `str` subclasses. The policy loader
 uses Pydantic validation to construct those types from YAML and rejects malformed identifiers,
 empty catalogs, undefined model-group references, and model groups that no workload can select.
 
-A syntactically valid workload that is absent from the active policy reaches the deterministic
-routing boundary and fails closed. The transport no longer decides authorization by maintaining a
-hard-coded workload enum.
+A syntactically valid namespace-qualified workload that is absent from the active policy reaches the
+deterministic routing boundary and fails closed. The transport no longer decides authorization by
+maintaining a hard-coded workload enum. A new unqualified workload is rejected as malformed before
+routing; this preserves the existing 0.x validation behavior for arbitrary underscore-delimited
+strings while providing a collision-resistant namespace for new policy vocabulary.
 
 For source compatibility during the 0.x migration window, `Workload` and `ModelGroup` remain aliases
-to the new identifier classes and the former credit-desk enum members remain class constants. These
-constants are migration conveniences only and are explicitly not the complete vocabulary.
+to the new identifier classes and the former credit-desk enum members remain class constants. The
+compatibility classes remain iterable over those former members so existing `set(Workload)` and
+`set(ModelGroup)` consumers continue to work. That iterable surface is migration-only and is not an
+authorization vocabulary.
 
 The legacy credit-desk policy is preserved under `examples/policies/credit-desk-routing.yaml`. A
 gateway-oriented policy is provided under `examples/policies/gateway-generic.yaml`.
@@ -51,7 +59,7 @@ gateway-oriented policy is provided under `examples/policies/gateway-generic.yam
 - routing performs no inference;
 - same request + same policy + same dependency state yields the same logical-group selection and
   reason codes;
-- unknown workloads fail closed;
+- unknown well-formed workloads fail closed;
 - data classification and risk remain controlled vocabularies;
 - policy ID, version, and SHA-256 digest continue to travel with decisions;
 - the router selects only a logical group, never a provider or concrete model;
@@ -65,7 +73,9 @@ new workload identifier.
 
 Policies become the vocabulary authority, so policy review and provenance become even more
 important. Identifier syntax is intentionally constrained to keep metrics, logs, policies, and
-cross-service contracts predictable.
+cross-service contracts predictable. Namespace-qualified workloads also reduce accidental naming
+collisions across independently developed gateway consumers.
 
-The API schema version stays at `1.0` because existing serialized workload/model-group values remain
-valid strings and the new contract is an acceptance-superset rather than a field-shape break.
+The API schema version stays at `1.0` because every previously valid serialized workload/model-group
+value remains valid and the field shapes are unchanged. The new workload namespace rule applies only
+to identifiers that were not part of the former closed 0.x workload vocabulary.

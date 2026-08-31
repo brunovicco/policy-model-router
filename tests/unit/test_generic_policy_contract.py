@@ -16,7 +16,12 @@ from policy_model_router.application.route_model import (
     IncompleteRoutingPolicyError,
     RouteModelUseCase,
 )
-from policy_model_router.domain.enums import DataClassification, RiskLevel
+from policy_model_router.domain.enums import (
+    DataClassification,
+    ModelGroup,
+    RiskLevel,
+    Workload,
+)
 from policy_model_router.domain.identifiers import ModelGroupId, WorkloadId
 from policy_model_router.domain.routing import RouteRequest
 from policy_model_router.entrypoints.contracts import ModelRouteRequest
@@ -89,7 +94,15 @@ def test_api_v1_accepts_policy_defined_workload_identifier() -> None:
 @pytest.mark.contract
 @pytest.mark.parametrize(
     "workload",
-    ["Agent.Orchestration", "agent orchestration", ".agent", "agent/execute", "a" * 129],
+    [
+        "Agent.Orchestration",
+        "agent orchestration",
+        ".agent",
+        "agent/execute",
+        "not_a_real_workload",
+        "unqualified-workload",
+        "a" * 129,
+    ],
 )
 def test_api_v1_rejects_invalid_workload_identifier_syntax(workload: str) -> None:
     with pytest.raises(ValidationError):
@@ -110,6 +123,25 @@ def test_api_v1_rejects_invalid_workload_identifier_syntax(workload: str) -> Non
                 "max_cost_usd": "1.00",
             }
         )
+
+
+@pytest.mark.contract
+def test_legacy_compatibility_aliases_remain_iterable_without_closing_vocabulary() -> None:
+    assert set(Workload) == {
+        Workload.DOCUMENT_EXTRACTION,
+        Workload.CASHFLOW_ANALYSIS,
+        Workload.FINDINGS_CORRELATION,
+        Workload.OPINION_DRAFTING,
+        Workload.JSON_REPAIR,
+    }
+    assert set(ModelGroup) == {
+        ModelGroup.FAST_SMALL,
+        ModelGroup.REASONING_MEDIUM,
+        ModelGroup.REASONING_STRONG,
+        ModelGroup.FAST_STRUCTURED_OUTPUT,
+    }
+    assert WorkloadId("agent.orchestration") not in set(Workload)
+    assert ModelGroupId("agentic-strong") not in set(ModelGroup)
 
 
 @pytest.mark.contract
