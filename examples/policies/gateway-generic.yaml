@@ -1,0 +1,95 @@
+# Gateway-oriented generic routing policy for Policy Model Router API 1.0.
+# Workload and model-group names are policy-defined identifiers, not Python enums.
+schema_version: "1.0"
+policy_id: "gateway-generic-routing"
+policy_version: "1.0.0"
+
+model_groups:
+  fast-small:
+    authorized_data_classifications: [public, internal]
+    authorized_risk_levels: [low, medium]
+    supports_structured_output: false
+    supports_tool_calling: false
+    max_context_tokens: 32000
+    typical_latency_ms: 2500
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
+    available: true
+    allowed_agents: []
+
+  balanced:
+    authorized_data_classifications: [public, internal, confidential]
+    authorized_risk_levels: [low, medium, high]
+    supports_structured_output: true
+    supports_tool_calling: true
+    max_context_tokens: 128000
+    typical_latency_ms: 8000
+    input_cost_usd_per_million_tokens: "0.50"
+    output_cost_usd_per_million_tokens: "2.00"
+    available: true
+    allowed_agents: []
+
+  reasoning-strong:
+    authorized_data_classifications: [public, internal, confidential, restricted]
+    authorized_risk_levels: [low, medium, high, critical]
+    supports_structured_output: true
+    supports_tool_calling: true
+    max_context_tokens: 256000
+    typical_latency_ms: 20000
+    input_cost_usd_per_million_tokens: "2.00"
+    output_cost_usd_per_million_tokens: "8.00"
+    available: true
+    allowed_agents: []
+
+  agentic-strong:
+    authorized_data_classifications: [public, internal, confidential, restricted]
+    authorized_risk_levels: [low, medium, high, critical]
+    supports_structured_output: true
+    supports_tool_calling: true
+    max_context_tokens: 256000
+    typical_latency_ms: 15000
+    input_cost_usd_per_million_tokens: "2.00"
+    output_cost_usd_per_million_tokens: "8.00"
+    available: true
+    allowed_agents: []
+
+  structured-fast:
+    authorized_data_classifications: [public, internal]
+    authorized_risk_levels: [low, medium]
+    supports_structured_output: true
+    supports_tool_calling: false
+    max_context_tokens: 32000
+    typical_latency_ms: 3000
+    input_cost_usd_per_million_tokens: "0.20"
+    output_cost_usd_per_million_tokens: "0.80"
+    available: true
+    allowed_agents: []
+
+workloads:
+  classification.simple:
+    model_group: fast-small
+    requires_tool_calling: false
+  extraction.structured:
+    model_group: structured-fast
+    requires_tool_calling: false
+  rag.answer:
+    model_group: balanced
+    requires_tool_calling: false
+  reasoning.complex:
+    model_group: reasoning-strong
+    requires_tool_calling: false
+  security.analysis:
+    model_group: reasoning-strong
+    requires_tool_calling: false
+  code.generate:
+    model_group: reasoning-strong
+    requires_tool_calling: false
+  code.review:
+    model_group: reasoning-strong
+    requires_tool_calling: false
+  agent.orchestration:
+    model_group: agentic-strong
+    requires_tool_calling: false
+  agent.tool-use:
+    model_group: agentic-strong
+    requires_tool_calling: true
