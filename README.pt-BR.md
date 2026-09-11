@@ -317,7 +317,7 @@ contexto de trace W3C recebido é continuado através da fronteira
 | `src/policy_model_router/entrypoints/` | Contratos Pydantic de wire, app FastAPI, configurações, mapeamento de erros, evidência de violação |
 | `config/`, `examples/policies/` | A política incluída e políticas de exemplo alternativas |
 | `docs/adr/` | Quinze decisões aceitas, emendadas em vez de reescritas |
-| `scripts/` | O gate de qualidade do projeto e seus validadores de arquitetura, MCP e contratos |
+| `scripts/` | O gate de qualidade do projeto e seus validadores de arquitetura e contratos |
 
 As dependências apontam só para dentro — `entrypoints → application → domain`,
 `adapters → application/domain`, e `domain` não depende de camada externa. O gate falha em qualquer

@@ -19,7 +19,6 @@
       "Bash(uv run python scripts/quality_gate.py *)",
       "Bash(uv run ruff *)",
       "Bash(uv run python scripts/validate_architecture.py)",
-      "Bash(uv run python scripts/validate_mcp_config.py)",
       "Bash(uv run mypy *)",
       "Bash(uv run pytest *)",
       "Bash(uv run bandit *)",

@@ -310,7 +310,7 @@ across the boundary ([ADR-0016](docs/adr/0016-w3c-runtime-trace-context.md),
 | `src/policy_model_router/entrypoints/` | Pydantic wire contracts, the FastAPI app, settings, error mapping, violation evidence |
 | `config/`, `examples/policies/` | The shipped policy and alternative example policies |
 | `docs/adr/` | Fifteen accepted decisions, amended rather than rewritten |
-| `scripts/` | The project quality gate and its architecture, MCP and contract validators |
+| `scripts/` | The project quality gate and its architecture and contract validators |
 
 Dependencies point inward only — `entrypoints → application → domain`, `adapters → application/domain`,
 and `domain` depends on no outer layer. The gate fails on any module that sits outside a layer, so

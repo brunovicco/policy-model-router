@@ -6,6 +6,6 @@ context: fork
 agent: mcp-integrator
 ---
 
-Review the repository MCP configuration without authenticating or invoking external MCP tools.
+Review MCP configuration without authenticating or invoking external MCP tools. This repository ships no project-scope configuration, so the subject is whatever the developer has connected at user scope, or a configuration being proposed.
 
-Check scope, transport, endpoint trust, dependency pinning, credentials, least privilege, write capabilities, production access, PII, prompt injection, timeout, auditability, managed-policy compatibility, and documentation. Run `uv run python scripts/validate_mcp_config.py` and return evidence-backed findings ordered by severity.
+Check scope, transport, endpoint trust, dependency pinning, credentials, least privilege, write capabilities, production access, PII, prompt injection, timeout, auditability, managed-policy compatibility, and documentation. Return evidence-backed findings ordered by severity.

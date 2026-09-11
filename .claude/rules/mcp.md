@@ -1,11 +1,7 @@
 ---
 paths:
   - ".mcp.json"
-  - ".mcp.json.example"
-  - "docs/MCP.md"
-  - "docs/mcp/**"
   - ".claude/hooks/guard_mcp.py"
-  - "scripts/validate_mcp_config.py"
 ---
 
 # MCP engineering rules
@@ -18,5 +14,4 @@ paths:
 - Do not mutate production systems through the development harness.
 - Use least-privilege identities, read-only database users, narrow roots, explicit timeouts, and pinned local server dependencies.
 - Avoid broad `mcp__...__*` permissions in skills and agents. Permit named read-only tools where stable and let mutating tools remain permission-gated.
-- Run `uv run python scripts/validate_mcp_config.py` after changing MCP configuration.
-- Document purpose, owner, accessed data, permitted actions, authentication, retention, and revocation in `docs/MCP.md` or an ADR.
+- This repository ships no project-scope MCP configuration. If one is ever added, document purpose, owner, accessed data, permitted actions, authentication, retention, and revocation in an ADR.
