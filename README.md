@@ -261,7 +261,9 @@ is verified in a fixed order before routing and re-checked after it:
 4. **Request binding** — eleven request facts must match the signed claims.
 5. **Agent binding** — the calling `agent_name` must map to the signed Governance `agent_id`.
 6. **Policy provenance** — the signed policy and control-catalog identity must be the trusted one.
-7. **Runtime control** — kill switch and revocation floor, read from a Governance projection.
+7. **Runtime control** — kill switch and revocation floor, read from a Governance projection
+   ([enforcement](docs/runtime-kill-switch-enforcement.md),
+   [threat model](docs/runtime-kill-switch-threat-model.md)).
 8. **Single use** — the authorization identifier is consumed atomically; a replay is denied.
 9. **Selected model** — *after* routing, the selected group must itself be in the signed scope.
 
@@ -295,7 +297,8 @@ unbounded label is unbounded memory. Structured logs keep the verbatim value.
 Every decision also emits a `routing_decision` log line with the decision id, correlation id,
 workload, model group, reason code and policy identity. Caller-supplied `workflow_id` and `task_id`
 stay out of logs per [`docs/PRIVACY.md`](docs/PRIVACY.md). Incoming W3C trace context is continued
-across the boundary.
+across the boundary ([ADR-0016](docs/adr/0016-w3c-runtime-trace-context.md),
+[configuration](docs/runtime-tracing.md)).
 
 ## Repository map
 
@@ -335,6 +338,8 @@ Those boundaries keep policy decisions explicit. Tracked gaps are listed in
 - [`docs/runtime-authorization-operations.md`](docs/runtime-authorization-operations.md) — governed deployments, end to end
 - [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — every environment variable
 - [`docs/MIGRATION_TO_GENERIC_POLICY.md`](docs/MIGRATION_TO_GENERIC_POLICY.md) — policy-defined identifiers
+- [`docs/runtime-kill-switch-enforcement.md`](docs/runtime-kill-switch-enforcement.md) and its [threat model](docs/runtime-kill-switch-threat-model.md) — stopping a governed agent mid-flight
+- [`docs/runtime-tracing.md`](docs/runtime-tracing.md) — continuing a distributed trace, and the [dependency evaluation](docs/A2A_OTEL_KIT_UPGRADE_EVALUATION.md) behind the pinned version
 - [`docs/PRIVACY.md`](docs/PRIVACY.md) — what never reaches a log
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) and [`AGENTS.md`](AGENTS.md) — working on this repository
 

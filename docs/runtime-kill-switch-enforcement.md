@@ -3,6 +3,11 @@
 P1.6b makes the Policy Model Router an enforcement consumer of the runtime-control projection owned
 by `verifiable-ai-governance` P1.6a.
 
+The decision is [ADR-0014](adr/0014-runtime-kill-switch-enforcement.md). What this control is meant
+to stop, and which threats it deliberately does not address, is
+[`runtime-kill-switch-threat-model.md`](runtime-kill-switch-threat-model.md) — read it before
+changing any of the fail-closed behavior below, because each rule here answers a threat there.
+
 ## Configuration
 
 The Router reuses `REDIS_URL` and reads the exact Governance namespace:
