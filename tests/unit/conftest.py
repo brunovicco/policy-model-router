@@ -31,7 +31,7 @@ def anyio_backend() -> str:
 def _reset_structlog() -> Generator[None]:
     """Reset structlog's global configuration and logger cache after every test.
 
-    Several tests call ``configure_logging()`` (via ``TestClient(app)``'s lifespan) or
+    Several tests configure structlog (via ``TestClient(app)``'s lifespan) or
     ``structlog.testing.capture_logs()``, both of which mutate structlog's *process-global*
     configuration. ``structlog.reset_defaults()`` undoes that, but it cannot undo
     ``cache_logger_on_first_use``'s effect on an already-resolved module-level logger: structlog
@@ -39,7 +39,7 @@ def _reset_structlog() -> Generator[None]:
     *instance* (see ``structlog._config.BoundLoggerLazyProxy.bind``), which no amount of
     reconfiguring the global config can reverse. ``redis_rate_limiter.py``'s and ``http.py``'s
     module-level ``logger``s are exactly such proxies: the first test that logs through either
-    while ``cache_logger_on_first_use=True`` (set by ``configure_logging()``) permanently pins it
+    while ``cache_logger_on_first_use=True`` (set at startup) permanently pins it
     to that run's processor chain, silently breaking every later test's ``capture_logs()``
     assertions regardless of ordering. Popping the instance-level ``bind`` override restores each
     proxy to its lazy, unresolved state so the next test starts clean.

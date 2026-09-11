@@ -263,7 +263,7 @@ def test_route_emits_a_routing_decision_log_event_on_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Uses its own TestClient/capture_logs pair, entered together: the ``client`` fixture would
-    already have run the lifespan's ``configure_logging()`` before ``capture_logs`` could patch
+    already have configured structlog in the lifespan before ``capture_logs`` could patch
     structlog's processor chain, so no log line would be captured (see the sibling correlation-id
     test for the same reason).
     """
