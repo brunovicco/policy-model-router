@@ -138,14 +138,3 @@ test-roots = ["tests"]
 [tool.engineering-harness.architecture]
 source-roots = ["src"]
 clean-architecture = true
-# Modules that predate the layer rule and are therefore exempt from it, one by one. A module listed
-# here is not checked by any dependency rule - `layer_for` cannot classify it - so this list is
-# tracked debt, not configuration: it may only shrink. Removing an entry after moving the module is
-# not optional, because a stale entry fails the gate. See docs/ARCHITECTURE.md, "Known gaps".
-unlayered-allowlist = [
-    "policy_model_router/runtime_authorization.py",
-    "policy_model_router/runtime_authorization_contract.py",
-    "policy_model_router/runtime_control.py",
-    "policy_model_router/runtime_violation.py",
-    "policy_model_router/runtime_violation_contract.py",
-]

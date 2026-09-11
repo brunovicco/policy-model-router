@@ -11,23 +11,14 @@ from uuid import UUID
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from policy_model_router.domain.enums import (
-    DataClassification,
-    ModelGroup,
-    RiskLevel,
-    Workload,
-)
-from policy_model_router.entrypoints.contracts import ModelRouteRequest
-from policy_model_router.runtime_authorization import (
+from policy_model_router.adapters.runtime_authorization import (
     InMemoryRuntimeAuthorizationReplayGuard,
-    RuntimeAuthorizationError,
-    RuntimeAuthorizationKeyStatus,
+)
+from policy_model_router.application.runtime_authorization import (
     RuntimeAuthorizationVerifier,
-    TrustedRuntimeAuthorizationKey,
-    TrustedRuntimeAuthorizationKeySet,
     VerifiedRuntimeAuthorization,
 )
-from policy_model_router.runtime_authorization_contract import (
+from policy_model_router.application.runtime_authorization_contract import (
     AuthorizationAutonomyLevel,
     AuthorizationRiskTier,
     AuthorizedRuntimeModel,
@@ -39,29 +30,46 @@ from policy_model_router.runtime_authorization_contract import (
     RuntimeRequestBinding,
     SignedRuntimeAuthorization,
 )
+from policy_model_router.domain.enums import (
+    DataClassification,
+    ModelGroup,
+    RiskLevel,
+    Workload,
+)
+from policy_model_router.domain.routing import RouteRequest
+from policy_model_router.domain.runtime_authorization import (
+    RuntimeAuthorizationError,
+    RuntimeAuthorizationKeyStatus,
+    TrustedRuntimeAuthorizationKey,
+    TrustedRuntimeAuthorizationKeySet,
+)
 
 NOW = datetime(2026, 8, 7, 18, 0, tzinfo=UTC)
 AGENT_ID = UUID("33333333-3333-4333-8333-333333333333")
 
 
-def _route_request(**updates: object) -> ModelRouteRequest:
-    values: dict[str, object] = {
-        "schema_version": "1.0",
-        "requested_at": NOW,
-        "workflow_id": "credit-analysis-2026-001",
-        "task_id": "draft-opinion",
-        "agent_name": "Agente de Parecer de Crédito PJ",
-        "workload": Workload.OPINION_DRAFTING,
-        "risk_level": RiskLevel.HIGH,
-        "data_classification": DataClassification.RESTRICTED,
-        "context_tokens_estimated": 3000,
-        "max_output_tokens_estimated": 900,
-        "structured_output_required": False,
-        "max_latency_ms": 30_000,
-        "max_cost_usd": Decimal("0.30"),
-    }
-    values.update(updates)
-    return ModelRouteRequest(**values)
+def _route_request(*, max_latency_ms: int = 30_000) -> RouteRequest:
+    """Build the request the signed fixtures below are bound to.
+
+    Only ``max_latency_ms`` is ever varied - by the binding-mismatch test - so it is an explicit
+    typed parameter rather than untyped keyword overrides. Any field a future test needs to vary
+    gets the same treatment, which keeps the helper checkable instead of accepting anything.
+    """
+    return RouteRequest(
+        schema_version="1.0",
+        requested_at=NOW,
+        workflow_id="credit-analysis-2026-001",
+        task_id="draft-opinion",
+        agent_name="Agente de Parecer de Crédito PJ",
+        workload=Workload.OPINION_DRAFTING,
+        risk_level=RiskLevel.HIGH,
+        data_classification=DataClassification.RESTRICTED,
+        context_tokens_estimated=3000,
+        max_output_tokens_estimated=900,
+        structured_output_required=False,
+        max_latency_ms=max_latency_ms,
+        max_cost_usd=Decimal("0.30"),
+    )
 
 
 def _claims(**updates: object) -> RuntimeAuthorizationClaims:
@@ -171,7 +179,7 @@ def _verifier(
 def _verify(
     verifier: RuntimeAuthorizationVerifier,
     envelope: SignedRuntimeAuthorization,
-    request: ModelRouteRequest,
+    request: RouteRequest,
     *,
     seconds: int = 1,
 ) -> VerifiedRuntimeAuthorization:

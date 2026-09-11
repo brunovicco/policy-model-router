@@ -592,10 +592,12 @@ domain      -> no outer layer
 - `entrypoints`: Pydantic wire contracts, FastAPI endpoints (`/route`, `/health`, `/readyz`,
   `/metrics`), settings, error mapping, and structured logging.
 
-The runtime enforcement modules - the signed-authorization contract and verifier, the runtime
-control reader, and the violation-evidence builder - currently sit at the package root rather than
-inside a layer, and are not yet covered by the architecture gate. That is tracked as a known gap in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#known-gaps), not a settled placement.
+The runtime enforcement modules follow the same direction: the trusted key set and kill-switch
+state are domain values, the verifier and the control enforcer are application use cases behind
+ports, the replay guards and projection stores are adapters, and the wire contracts stay in
+`entrypoints`. The one deliberate exception is the signed Governance envelope, which lives in
+`application` rather than `domain`: it is a Pydantic contract whose canonical signing bytes must
+stay byte-for-byte compatible with the issuing repository.
 
 The policy is loaded once at startup, and request handling is stateless. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the dependency rules and diagrams, and the

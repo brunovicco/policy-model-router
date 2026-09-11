@@ -614,11 +614,12 @@ domain      -> no outer layer
 - `entrypoints`: contratos Pydantic de wire, endpoints FastAPI (`/route`, `/health`, `/readyz`,
   `/metrics`), configurações, mapeamento de erros e logging estruturado.
 
-Os módulos de aplicação em runtime - o contrato e o verificador de autorização assinada, o leitor de
-controle de runtime e o construtor de evidência de violação - hoje ficam na raiz do pacote, fora de
-uma camada, e ainda não são cobertos pelo gate de arquitetura. Isso está registrado como débito
-conhecido em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#known-gaps), não como posicionamento
-decidido.
+Os módulos de aplicação em runtime seguem a mesma direção: o conjunto de chaves confiáveis e o
+estado da parada de emergência são valores de domínio, o verificador e o enforcer de controle são
+casos de uso atrás de ports, os guards antirrepetição e os stores de projeção são adapters, e os
+contratos de wire ficam em `entrypoints`. A única exceção deliberada é o envelope assinado da
+Governança, que fica em `application` e não em `domain`: é um contrato Pydantic cujos bytes
+canônicos de assinatura precisam continuar byte a byte compatíveis com o repositório emissor.
 
 A política é carregada uma única vez na inicialização, e o tratamento de requisições é *stateless*.
 Veja [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) para as regras de dependência e diagramas, e o
