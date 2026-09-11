@@ -4,15 +4,17 @@
 
 Policy Model Router is a standalone HTTP service that decides which logical **model group**
 (`fast-small`, `reasoning-medium`, `reasoning-strong`, `fast-structured-output`) is authorized to
-serve a given LLM workload, before any inference call happens. It sits upstream of a model
-gateway (LiteLLM in the target deployment) and downstream of the agents that need a routing
-decision.
+serve a given LLM workload, before any inference call happens. It is the Policy Decision Point of
+a PDP/PEP pair: it sits upstream of the enforcement point that executes the call - the
+provider-neutral [governed-llm-gateway](https://github.com/brunovicco/governed-llm-gateway) in the
+target deployment - and downstream of the agents that need a routing decision. See ADR-0004's
+2026-09-11 amendment.
 
 ```mermaid
 flowchart LR
     Agent["Calling agent / workflow"] -->|"POST /route"| Router["policy-model-router"]
     Router -->|"selected_model_group"| Agent
-    Agent -->|"provider/deployment call"| Gateway["Model gateway (LiteLLM)"]
+    Agent -->|"provider/deployment call"| Gateway["Governed LLM Gateway (PEP)"]
     Router -.->|"loads at startup"| Policy["config/routing_policy.yaml"]
 ```
 
@@ -172,7 +174,8 @@ Enforced by `scripts/validate_architecture.py` as part of the quality gate.
 
 - [ADR-0001](adr/0001-clean-architecture.md): Clean Architecture dependency boundaries.
 - [ADR-0004](adr/0004-litellm-provider-boundary.md): provider/deployment selection is out of
-  scope; this service returns a logical model group only.
+  scope; this service returns a logical model group only. Amended 2026-09-11 to name the actual
+  enforcement point (`governed-llm-gateway`, not LiteLLM) and the invariant between them.
 - [ADR-0005](adr/0005-deterministic-policy-routing.md): deterministic, ordered, fail-closed
   routing algorithm with no weighted fallback in the MVP; amended to make `risk_level` eliminatory.
 - [ADR-0006](adr/0006-availability-provider-port.md): availability resolved through a pluggable
