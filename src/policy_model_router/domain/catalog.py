@@ -14,7 +14,13 @@ from policy_model_router.domain.identifiers import ModelGroupId, WorkloadId
 
 @dataclass(frozen=True, slots=True)
 class ModelGroupProfile:
-    """Capabilities and authorizations of one logical model group."""
+    """Capabilities and authorizations of one logical model group.
+
+    ``staged`` marks a group that is declared and provisioned but not yet mapped by any workload -
+    a canary, a reserve, or a group being prepared before traffic is pointed at it. It exempts the
+    group from the loader's reachability check and nothing else: a staged group is still validated
+    in full, and is still unreachable until a workload maps to it.
+    """
 
     authorized_data_classifications: frozenset[DataClassification]
     authorized_risk_levels: frozenset[RiskLevel]
@@ -26,6 +32,7 @@ class ModelGroupProfile:
     output_cost_usd_per_million_tokens: Decimal
     available: bool
     allowed_agents: frozenset[str]
+    staged: bool = False
 
     def estimated_cost(self, *, input_tokens: int, output_tokens: int) -> Decimal:
         """Return the estimated USD cost of a call with the given input/output token counts."""

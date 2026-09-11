@@ -322,6 +322,12 @@ Edit [`config/routing_policy.yaml`](config/routing_policy.yaml) to manage worklo
 model-group capabilities. The loader requires complete coverage of every declared workload and
 model group and rejects unknown fields.
 
+A model group no workload maps to is rejected too, so configuration cannot be left behind by
+accident. Declare `staged: true` on a group you are provisioning deliberately ahead of the workload
+that will use it - a canary, a reserve, or a group being prepared for a later cutover. Staging
+exempts a group from that reachability check and nothing else: it is still validated in full, and
+still unreachable until a workload maps to it.
+
 Send `SIGHUP` to reload the policy without restarting:
 
 ```bash

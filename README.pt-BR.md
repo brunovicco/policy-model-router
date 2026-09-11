@@ -332,6 +332,12 @@ Edite [`config/routing_policy.yaml`](config/routing_policy.yaml) para gerenciar 
 carga de trabalho e as capacidades dos grupos de modelo. O carregador exige cobertura completa de
 toda carga de trabalho e grupo de modelo declarado, e rejeita campos desconhecidos.
 
+Um grupo de modelo que nenhuma carga de trabalho mapeia também é rejeitado, para que configuração
+não fique para trás por descuido. Declare `staged: true` num grupo que você está provisionando de
+propósito antes da carga que vai usá-lo - um canary, uma reserva, ou um grupo em preparação para
+uma virada futura. O staging isenta o grupo dessa verificação de alcançabilidade e de mais nada:
+ele continua validado por inteiro, e continua inalcançável até que alguma carga o mapeie.
+
 Envie `SIGHUP` para recarregar a política sem reiniciar:
 
 ```bash

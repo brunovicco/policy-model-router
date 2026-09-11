@@ -17,6 +17,19 @@ from policy_model_router.domain.enums import DataClassification, ModelGroup, Wor
 
 _SHIPPED_POLICY_PATH = Path(__file__).resolve().parents[2] / "config" / "routing_policy.yaml"
 
+_ORPHAN_GROUP = """  canary-next:
+    authorized_data_classifications: [public]
+    authorized_risk_levels: [low]
+    supports_structured_output: false
+    supports_tool_calling: true
+    max_context_tokens: 1000
+    typical_latency_ms: 1000
+    input_cost_usd_per_million_tokens: "0.10"
+    output_cost_usd_per_million_tokens: "0.40"
+    available: true
+    allowed_agents: []
+{staged}"""
+
 _VALID_YAML = """
 schema_version: "1.0"
 policy_id: "test-policy"
@@ -195,3 +208,40 @@ def test_load_routing_policy_fails_closed_on_a_duplicate_top_level_key(tmp_path:
 
     with pytest.raises(RoutingPolicyLoadError):
         load_routing_policy(policy_path)
+def test_loader_rejects_a_model_group_no_workload_can_select(tmp_path: Path) -> None:
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(_VALID_YAML + _ORPHAN_GROUP.format(staged=""), encoding="utf-8")
+
+    with pytest.raises(RoutingPolicyLoadError, match="unreachable entries"):
+        load_routing_policy(policy)
+
+
+def test_loader_accepts_an_unreferenced_group_that_declares_itself_staged(
+    tmp_path: Path,
+) -> None:
+    """A canary or reserve group is declared before a workload maps to it.
+
+    The reachability check exists to catch configuration left behind by accident, so opting out has
+    to be deliberate and visible in the policy itself rather than a loader flag or an env var.
+    """
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(
+        _VALID_YAML + _ORPHAN_GROUP.format(staged="    staged: true\n"), encoding="utf-8"
+    )
+
+    loaded = load_routing_policy(policy)
+
+    staged = loaded.model_groups[ModelGroup("canary-next")]
+    assert staged.staged is True
+    assert all(rule.model_group != ModelGroup("canary-next") for rule in loaded.workloads.values())
+
+
+def test_a_group_a_workload_maps_to_is_not_staged_by_default(tmp_path: Path) -> None:
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(_VALID_YAML, encoding="utf-8")
+
+    loaded = load_routing_policy(policy)
+
+    assert all(not profile.staged for profile in loaded.model_groups.values())
+
+
