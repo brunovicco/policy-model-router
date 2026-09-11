@@ -42,6 +42,7 @@ def _policy_with_orphan_group(*, staged: bool) -> str:
     orphan = _ORPHAN_GROUP.format(staged="    staged: true\n" if staged else "")
     return head + orphan + separator + tail
 
+
 _VALID_YAML = """
 schema_version: "1.0"
 policy_id: "test-policy"
