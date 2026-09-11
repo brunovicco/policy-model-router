@@ -53,6 +53,20 @@ and `REDIS_URL` set, `uv run pytest` picks it up automatically; without either, 
 itself instead of failing. `.github/workflows/quality.yml` runs a `redis:7-alpine` service and
 installs the `rate-limit` extra, so it always runs (not skips) in CI.
 
+## `.harness.json`
+
+This file is the provenance record of the scaffold this repository was generated from: the
+engineering-harness version and source commit, and the mode and SHA-256 of every file it installed.
+
+**It is expected to drift, and it is not maintained by hand.** Its whole purpose is to record what
+the harness put here, so that re-running the harness can tell what this repository has since
+customised. Recomputing the hashes to match the working tree would make it report "no drift" while
+the drift is exactly the thing worth knowing, and it currently names three files that later changes
+removed — that divergence is information, not a defect to paper over.
+
+Nothing in this repository reads it: no script, no workflow, no gate. Regenerate it through the
+harness when upgrading the scaffold; do not edit it in a feature branch.
+
 ## Claude Code
 
 - Run `/memory` to confirm loaded instructions.

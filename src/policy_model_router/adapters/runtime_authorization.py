@@ -212,6 +212,15 @@ def _parse_key_entry(entry: object) -> TrustedRuntimeAuthorizationKey:
         public_key = Ed25519PublicKey.from_public_bytes(public_bytes)
         not_before = parse_utc(entry["not_before"])
         verify_until = parse_utc(entry["verify_until"])
+    except RuntimeAuthorizationError as exc:
+        # `parse_utc` rejects a non-UTC timestamp with `invalid_time`, whose message is about the
+        # service's own verification clock. Reported against a key file it would send an operator
+        # to inspect the wrong thing, so it is normalized here: everything wrong with key material
+        # is `invalid_key_set`.
+        raise RuntimeAuthorizationError(
+            "invalid_key_set",
+            "Runtime authorization key material is invalid",
+        ) from exc
     except (ValueError, TypeError, binascii.Error) as exc:
         raise RuntimeAuthorizationError(
             "invalid_key_set",

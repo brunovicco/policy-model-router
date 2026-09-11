@@ -116,6 +116,29 @@ def _verifier(
     )
 
 
+def test_active_state_means_deny() -> None:
+    """Pin the polarity of the enum, in isolation from any authorization machinery.
+
+    `ACTIVE` is the kill switch being engaged, not the agent being live, so the two states read the
+    opposite way round from what the names suggest at a glance. An inversion here - on this side or
+    in the Governance projection that feeds it - would silence the control instead of failing it
+    safe, and nothing else in the suite would notice.
+    """
+    engaged = RuntimeControlEnforcer(
+        InMemoryRuntimeControlStore((_snapshot(state=RuntimeControlState.ACTIVE),))
+    )
+    released = RuntimeControlEnforcer(
+        InMemoryRuntimeControlStore((_snapshot(state=RuntimeControlState.INACTIVE),))
+    )
+
+    with pytest.raises(RuntimeControlEnforcementError) as excinfo:
+        asyncio.run(engaged.enforce(agent_id=AGENT_ID, agent_version=9))
+    allowed = asyncio.run(released.enforce(agent_id=AGENT_ID, agent_version=9))
+
+    assert excinfo.value.code == "kill_switch_engaged"
+    assert allowed.state is RuntimeControlState.INACTIVE
+
+
 def test_active_kill_switch_denies_before_replay_consumption() -> None:
     private_key = Ed25519PrivateKey.generate()
     replay_guard = _CountingReplayGuard()
