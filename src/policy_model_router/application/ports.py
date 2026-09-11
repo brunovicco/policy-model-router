@@ -37,9 +37,7 @@ class AvailabilityProvider(Protocol):
     adapter exists.
     """
 
-    async def resolve(
-        self, declared: Mapping[ModelGroupId, bool]
-    ) -> Mapping[ModelGroupId, bool]:
+    async def resolve(self, declared: Mapping[ModelGroupId, bool]) -> Mapping[ModelGroupId, bool]:
         """Return effective availability for every group in ``declared``.
 
         Args:
