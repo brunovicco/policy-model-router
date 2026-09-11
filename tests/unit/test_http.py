@@ -1,5 +1,6 @@
 """Behavior tests for the ``POST /route`` HTTP entrypoint, using the shipped routing policy."""
 
+import asyncio
 import json
 import sys
 import types
@@ -608,6 +609,94 @@ def test_readyz_endpoint_requires_no_api_key(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
+
+
+_RELOADABLE_POLICY = """
+schema_version: "1.0"
+policy_id: "reload-test-policy"
+policy_version: "{version}"
+model_groups:
+  reasoning-strong:
+    authorized_data_classifications: [public, internal, confidential, restricted]
+    authorized_risk_levels: [low, medium, high, critical]
+    supports_structured_output: false
+    supports_tool_calling: true
+    max_context_tokens: 128000
+    typical_latency_ms: {latency}
+    input_cost_usd_per_million_tokens: "2.00"
+    output_cost_usd_per_million_tokens: "8.00"
+    available: true
+    allowed_agents: []
+workloads:
+  cashflow_analysis:
+    model_group: reasoning-strong
+    requires_tool_calling: false
+"""
+
+
+@pytest.fixture
+def reloadable_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Generator[tuple[TestClient, Path]]:
+    """A client whose policy file can be rewritten between requests."""
+    policy_path = tmp_path / "routing_policy.yaml"
+    policy_path.write_text(_RELOADABLE_POLICY.format(version="1.0.0", latency=30_000), "utf-8")
+    monkeypatch.setenv("ROUTING_POLICY_PATH", str(policy_path))
+    monkeypatch.setenv("API_KEYS", _API_KEYS_JSON)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    with TestClient(app) as test_client:
+        yield test_client, policy_path
+
+
+def _decide(client: TestClient) -> dict[str, Any]:
+    response = client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
+    assert response.status_code == 200
+    decision: dict[str, Any] = response.json()
+    return decision
+
+
+def test_reload_swaps_the_policy_that_decides_subsequent_requests(
+    reloadable_client: tuple[TestClient, Path],
+) -> None:
+    client, policy_path = reloadable_client
+    before = _decide(client)
+
+    policy_path.write_text(_RELOADABLE_POLICY.format(version="2.0.0", latency=25_000), "utf-8")
+    assert asyncio.run(http_module.reload_routing_policy(app)) is True
+
+    after = _decide(client)
+    assert before["policy_version"] == "1.0.0"
+    assert after["policy_version"] == "2.0.0"
+    assert after["policy_digest"] != before["policy_digest"]
+
+
+def test_reload_keeps_serving_the_previous_policy_when_the_new_one_is_invalid(
+    reloadable_client: tuple[TestClient, Path],
+) -> None:
+    """A broken policy file must not take the service down, and must not be silent."""
+    client, policy_path = reloadable_client
+    before = _decide(client)
+
+    policy_path.write_text("schema_version: '1.0'\nmodel_groups: {}\n", "utf-8")
+    assert asyncio.run(http_module.reload_routing_policy(app)) is False
+
+    after = _decide(client)
+    assert after["policy_digest"] == before["policy_digest"]
+    assert 'outcome="failed"' in client.get("/metrics").text
+
+
+def test_reload_failure_is_logged_with_the_policy_still_in_effect(
+    reloadable_client: tuple[TestClient, Path],
+) -> None:
+    client, policy_path = reloadable_client
+    serving = _decide(client)["policy_digest"]
+    policy_path.write_text("not: [valid", "utf-8")
+
+    with capture_logs() as logs:
+        assert asyncio.run(http_module.reload_routing_policy(app)) is False
+
+    failure = next(entry for entry in logs if entry["event"] == "routing_policy_reload_failed")
+    assert failure["retained_policy_digest"] == serving
 
 
 def test_metrics_endpoint_requires_no_api_key(client: TestClient) -> None:

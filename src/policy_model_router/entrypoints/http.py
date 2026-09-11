@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import secrets
+import signal
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -38,7 +39,10 @@ from policy_model_router.adapters.clock import SystemClock
 from policy_model_router.adapters.id_generator import Uuid4IdGenerator
 from policy_model_router.adapters.rate_limiter import InMemoryRateLimiter, RateLimitExceededError
 from policy_model_router.adapters.redis_rate_limiter import RedisRateLimiter
-from policy_model_router.adapters.routing_policy_loader import load_routing_policy
+from policy_model_router.adapters.routing_policy_loader import (
+    RoutingPolicyLoadError,
+    load_routing_policy,
+)
 from policy_model_router.application.route_model import (
     IncompleteRoutingPolicyError,
     RouteModelUseCase,
@@ -106,6 +110,11 @@ RATE_LIMIT_DECISIONS_TOTAL = Counter(
 RUNTIME_AUTHORIZATION_TOTAL = Counter(
     "policy_model_router_runtime_authorization_total",
     "Runtime authorization checks labeled by bounded outcome.",
+    ["outcome"],
+)
+POLICY_RELOADS_TOTAL = Counter(
+    "policy_model_router_policy_reloads_total",
+    "Routing-policy reload attempts, labeled by outcome (succeeded, failed).",
     ["outcome"],
 )
 RUNTIME_VIOLATIONS_TOTAL = Counter(
@@ -309,6 +318,92 @@ def _build_rate_limiter(
     )
 
 
+async def reload_routing_policy(app: FastAPI) -> bool:
+    """Re-read the routing policy from disk and swap it in atomically. Returns whether it changed.
+
+    Keeping the policy immutable and replacing the whole use case, rather than mutating a policy in
+    place, is what makes this safe without a lock: a request resolves ``app.state`` once through
+    ``get_route_model_use_case`` and then holds that use case for its lifetime, so a decision is
+    always produced by exactly one policy version and the ``policy_digest`` it reports is the one
+    that actually decided it. A reload never affects a request already in flight.
+
+    A policy that fails to load leaves the running one untouched. Refusing to serve would turn a
+    typo in a YAML file into an outage, and restarting would only re-read the same broken file; the
+    failure is counted on ``POLICY_RELOADS_TOTAL`` and logged instead, so it is alertable rather
+    than silent. This is the one place in the service where failing closed means *not* replacing
+    what is already working.
+    """
+    settings = app.state.settings
+    try:
+        policy = await asyncio.to_thread(load_routing_policy, settings.routing_policy_path)
+    except RoutingPolicyLoadError as exc:
+        POLICY_RELOADS_TOTAL.labels(outcome="failed").inc()
+        logger.error(
+            "routing_policy_reload_failed",
+            error=str(exc),
+            retained_policy_digest=app.state.route_model_use_case.policy_digest,
+        )
+        return False
+
+    app.state.route_model_use_case = RouteModelUseCase(
+        policy,
+        clock=SystemClock(),
+        id_generator=Uuid4IdGenerator(),
+        availability=StaticAvailabilityProvider(),
+        service_version=app.state.service_version,
+        environment=app.state.environment,
+    )
+    POLICY_RELOADS_TOTAL.labels(outcome="succeeded").inc()
+    logger.info(
+        "routing_policy_reloaded",
+        policy_id=policy.policy_id,
+        policy_version=policy.policy_version,
+        policy_digest=policy.policy_digest,
+    )
+    return True
+
+
+def _install_reload_signal_handler(app: FastAPI) -> bool:
+    """Reload the routing policy on SIGHUP. Returns whether the handler was installed.
+
+    SIGHUP rather than an admin endpoint: this service deliberately exposes no authenticated
+    administrative surface (ADR-0007 disables even the OpenAPI docs by default), and a signal needs
+    no new key, rate limit or audit path. Uvicorn handles SIGINT/SIGTERM but not SIGHUP, so nothing
+    is being overridden here.
+
+    Not every platform supports ``add_signal_handler``. Losing reload is not worth refusing to
+    start, so this degrades to a warning - the policy simply stays what it was at startup, which is
+    the behavior every earlier version had.
+
+    Under multiple worker processes each worker holds its own policy and must receive its own
+    signal; a supervisor that signals only the parent will leave workers on the old policy.
+    """
+    pending: set[asyncio.Task[bool]] = set()
+    app.state.reload_tasks = pending
+
+    def _schedule_reload() -> None:
+        # Hold a strong reference until the task finishes: an unreferenced task can be garbage
+        # collected mid-flight, which would silently drop a reload the operator asked for.
+        task = asyncio.create_task(reload_routing_policy(app))
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    try:
+        asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, _schedule_reload)
+    except (NotImplementedError, RuntimeError, ValueError, AttributeError):
+        logger.warning("routing_policy_reload_unavailable", signal="SIGHUP")
+        return False
+    return True
+
+
+def _remove_reload_signal_handler() -> None:
+    """Drop the SIGHUP handler during shutdown so it cannot fire against a torn-down app."""
+    try:
+        asyncio.get_running_loop().remove_signal_handler(signal.SIGHUP)
+    except (NotImplementedError, RuntimeError, ValueError, AttributeError):
+        return
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Configure logging and load the routing policy, API keys, and rate limiters at startup.
@@ -342,6 +437,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         service_version=service_version,
         environment=settings.app_env,
     )
+    app.state.settings = settings
     app.state.api_keys = _required_api_keys()
     app.state.max_request_body_bytes = settings.max_request_body_bytes
     app.state.service_version = service_version
@@ -387,8 +483,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.rate_limiter = rate_limiter
     app.state.ip_rate_limiter = ip_rate_limiter
 
+    _install_reload_signal_handler(app)
+
     yield
 
+    _remove_reload_signal_handler()
     await asyncio.gather(
         rate_limiter.close(),
         ip_rate_limiter.close(),

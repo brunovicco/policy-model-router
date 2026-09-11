@@ -332,6 +332,24 @@ Edite [`config/routing_policy.yaml`](config/routing_policy.yaml) para gerenciar 
 carga de trabalho e as capacidades dos grupos de modelo. O carregador exige cobertura completa de
 toda carga de trabalho e grupo de modelo declarado, e rejeita campos desconhecidos.
 
+Envie `SIGHUP` para recarregar a política sem reiniciar:
+
+```bash
+docker kill --signal=HUP <container>      # ou: kubectl exec <pod> -- kill -HUP 1
+```
+
+A troca é atômica: uma requisição resolve a política uma vez ao começar e a mantém até terminar,
+então uma decisão é sempre produzida por uma única versão de política e o `policy_digest` que ela
+reporta é o que de fato decidiu. Uma requisição já em andamento nunca é afetada.
+
+Se o arquivo novo falhar ao carregar, **a política em uso é mantida** e o serviço continua
+atendendo. Recusar-se a atender transformaria um erro de digitação no YAML em indisponibilidade, e
+um restart apenas releria o mesmo arquivo quebrado. A falha incrementa
+`policy_model_router_policy_reloads_total{outcome="failed"}` e emite um log
+`routing_policy_reload_failed` com o digest que segue em vigor - monitore esse contador em vez de
+supor que a recarga funcionou. Com múltiplos worker processes, cada worker tem a própria política e
+precisa do próprio sinal.
+
 Use `ROUTING_POLICY_PATH` para carregar um arquivo específico de ambiente:
 
 ```bash
@@ -551,6 +569,7 @@ padrão de processo/Python que o registry do `prometheus_client` sempre expõe),
 | `policy_model_router_rate_limiter_backend_unavailable_total` | Counter | - | Requisições em que o rate limiter com Redis falhou aberto porque o Redis estava inacessível |
 | `policy_model_router_runtime_authorization_total` | Counter | `outcome` (`verified`, `denied`, `legacy_dev`) | Verificações de autorização de runtime assinada |
 | `policy_model_router_runtime_violations_total` | Counter | `category`, `code` | Violações de runtime com falha fechada, por categoria e código limitados |
+| `policy_model_router_policy_reloads_total` | Counter | `outcome` (`succeeded`, `failed`) | Tentativas de recarga da política de roteamento |
 
 Monitore `increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (somado
 entre réplicas) para detectar uma indisponibilidade prolongada do Redis em vez de depender só da
@@ -627,7 +646,7 @@ contratos de wire ficam em `entrypoints`. A única exceção deliberada é o env
 Governança, que fica em `application` e não em `domain`: é um contrato Pydantic cujos bytes
 canônicos de assinatura precisam continuar byte a byte compatíveis com o repositório emissor.
 
-A política é carregada uma única vez na inicialização, e o tratamento de requisições é *stateless*.
+A política é carregada na inicialização, relida em `SIGHUP`, e o tratamento de requisições é *stateless*.
 Veja [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) para as regras de dependência e diagramas, e o
 [índice de ADRs](docs/ARCHITECTURE.md#related-decisions) para entender por que a fronteira de
 provedor ([ADR-0004](docs/adr/0004-litellm-provider-boundary.md)), o algoritmo de roteamento
@@ -661,8 +680,8 @@ O MVP intencionalmente não:
   é a fronteira mais forte e já está disponível, mas ela autentica o *escopo de Governança de uma
   requisição*, não o chamador de transporte - não substitui mTLS ou OAuth2 client credentials na
   borda;
-- recarrega a política de roteamento sem reiniciar: ela é lida uma única vez na inicialização, então
-  mudar um mapeamento ou marcar um grupo como indisponível exige um novo deploy;
+- observa o arquivo de política nem recarrega sozinho: a recarga acontece quando um operador envia
+  `SIGHUP` (veja [Configuração da política](#configuração-da-política)), nunca automaticamente;
 - compartilha o estado de rate limit entre réplicas *por padrão*; isso exige habilitar `REDIS_URL`,
   o que por sua vez adiciona o Redis como uma dependência de infraestrutura real, com sua própria
   disponibilidade a gerenciar.

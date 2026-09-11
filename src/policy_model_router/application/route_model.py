@@ -46,6 +46,15 @@ class RouteModelUseCase:
         self._service_version = service_version
         self._environment = environment
 
+    @property
+    def policy_digest(self) -> str:
+        """Return the content digest of the policy this use case decides with.
+
+        Exposed so an operator-facing log line can name which policy is in effect without the
+        entrypoint reaching into the policy object.
+        """
+        return self._policy.policy_digest
+
     def declares_workload(self, workload: WorkloadId) -> bool:
         """Return whether the active policy defines a rule for ``workload``.
 

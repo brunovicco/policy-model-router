@@ -322,6 +322,23 @@ Edit [`config/routing_policy.yaml`](config/routing_policy.yaml) to manage worklo
 model-group capabilities. The loader requires complete coverage of every declared workload and
 model group and rejects unknown fields.
 
+Send `SIGHUP` to reload the policy without restarting:
+
+```bash
+docker kill --signal=HUP <container>      # or: kubectl exec <pod> -- kill -HUP 1
+```
+
+The reload is atomic: a request resolves the policy once when it starts and keeps it for its
+lifetime, so a decision is always produced by one policy version and the `policy_digest` it
+reports is the one that actually decided it. A request already in flight is never affected.
+
+If the new file fails to load, **the running policy is kept** and the service keeps serving.
+Refusing to serve would turn a YAML typo into an outage, and a restart would only re-read the same
+broken file. The failure increments `policy_model_router_policy_reloads_total{outcome="failed"}`
+and emits a `routing_policy_reload_failed` log line carrying the digest still in effect - alert on
+that counter rather than assuming a reload worked. Under multiple worker processes each worker
+holds its own policy and needs its own signal.
+
 Use `ROUTING_POLICY_PATH` to load an environment-specific file:
 
 ```bash
@@ -533,6 +550,7 @@ explicit denial.
 | `policy_model_router_rate_limiter_backend_unavailable_total` | Counter | - | Requests where the Redis-backed rate limiter failed open because Redis was unreachable |
 | `policy_model_router_runtime_authorization_total` | Counter | `outcome` (`verified`, `denied`, `legacy_dev`) | Signed runtime authorization checks |
 | `policy_model_router_runtime_violations_total` | Counter | `category`, `code` | Fail-closed runtime violations, by bounded category and reason code |
+| `policy_model_router_policy_reloads_total` | Counter | `outcome` (`succeeded`, `failed`) | Routing-policy reload attempts |
 
 Alert on `increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (summed
 across replicas) to catch a sustained Redis outage instead of relying on the
@@ -605,7 +623,7 @@ ports, the replay guards and projection stores are adapters, and the wire contra
 `application` rather than `domain`: it is a Pydantic contract whose canonical signing bytes must
 stay byte-for-byte compatible with the issuing repository.
 
-The policy is loaded once at startup, and request handling is stateless. See
+The policy is loaded at startup, re-read on `SIGHUP`, and request handling is stateless. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the dependency rules and diagrams, and the
 [ADR index](docs/ARCHITECTURE.md#related-decisions) for why the provider boundary
 ([ADR-0004](docs/adr/0004-litellm-provider-boundary.md)), the routing algorithm
@@ -640,8 +658,8 @@ The MVP intentionally does not:
   authorization is the stronger boundary and is available today, but it authenticates the
   *Governance scope of a request*, not the transport caller - it does not replace mTLS or OAuth2
   client credentials at the edge;
-- reload the routing policy without a restart: it is read once at startup, so changing a mapping
-  or marking a group unavailable is a redeploy;
+- watch the policy file, or reload it on its own: a reload happens when an operator sends `SIGHUP`
+  (see [Policy configuration](#policy-configuration)), never automatically;
 - share rate-limit state across replicas *by default*; that requires opting into `REDIS_URL`, which
   in turn adds Redis as a real infrastructure dependency with its own availability to manage.
 
