@@ -11,7 +11,18 @@ from enum import StrEnum
 
 
 class RuntimeControlState(StrEnum):
-    """Effective runtime execution state projected by Governance."""
+    """Effective runtime execution state projected by Governance.
+
+    The polarity is the control's, not the agent's, and it reads the opposite way round from what
+    the member names suggest at a glance:
+
+    - ``ACTIVE`` — the kill switch is *engaged*. Deny.
+    - ``INACTIVE`` — the kill switch is *released*. Execution may proceed.
+
+    The values mirror the Governance projection's wire contract exactly and are not reinterpreted
+    here, so they cannot be renamed unilaterally: an inversion on either side silences the control
+    that exists so the system fails safe. ``test_active_state_means_deny`` pins the direction.
+    """
 
     INACTIVE = "inactive"
     ACTIVE = "active"
