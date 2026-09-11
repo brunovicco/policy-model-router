@@ -26,7 +26,7 @@ other deployments in the pool are cleared.
   does not include the request's classification. See ADR-0005.
 - **The gateway's half** (out of scope, per ADR-0004): deciding *which* deployments belong to each
   group's provider pool, and whether each deployment is actually cleared for a classification
-  (contractual/regional/certification status), is the model gateway's (LiteLLM) configuration, not
+  (contractual/regional/certification status), is the downstream gateway's configuration, not
   this service's. This router only consumes the outcome of that decision, encoded in the policy
   file's `authorized_data_classifications` per group.
 

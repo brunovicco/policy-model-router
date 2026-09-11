@@ -49,3 +49,57 @@ Concretely:
   explicit integration, not an implicit one.
 - Callers must resolve `selected_model_group` to an actual provider/deployment through their own
   gateway; this service's response alone is not sufficient to make an inference call.
+
+## Amendment (2026-09-11): the downstream gateway is named, and it is not LiteLLM
+
+This ADR's Context states that "the organization already operates a model gateway (LiteLLM)
+responsible for provider/deployment routing, credentials, and failover," and its Decision assigns
+provider selection, failover and the inference call to LiteLLM by name. Both describe the
+deployment as it was assumed when the ADR was written retroactively from the code.
+
+The downstream that actually consumes this service is
+[governed-llm-gateway](https://github.com/brunovicco/governed-llm-gateway), which is
+provider-neutral and carries its own adapters for OpenAI, Anthropic, Gemini, Groq, OpenRouter and
+NVIDIA. It does not use LiteLLM.
+
+**Decision.** The boundary this ADR records is unchanged: this service returns a logical model
+group, never a provider, deployment or credential, and makes no outbound call. What changes is the
+name on the other side of it.
+
+The authority chain is a Policy Decision Point / Policy Enforcement Point pair:
+
+```text
+Verifiable AI Governance -> Policy Model Router (PDP) -> Governed LLM Gateway (PEP) -> provider
+```
+
+with the permanent invariant
+
+```text
+Gateway allowed set  ⊆  Policy Router authorized set
+```
+
+The gateway may reject more deployments than this router authorized; it may never broaden or
+synthesize authorization. That is why a rejection here carries the same provenance as an acceptance
+(ADR-0009): the enforcement point must be able to prove *which* policy denied a call. The binding
+is versioned against `POST /route` wire schema `1.0` and documented on the gateway side in
+`docs/architecture/PDP_PEP_CONTRACT_DRAFT.md`.
+
+**LiteLLM remains possible, one layer lower.** The gateway's own ADR-0004 defines an explicit
+OpenAI-compatible adapter family for "compatible custom endpoints," and LiteLLM's proxy speaks that
+wire, so a LiteLLM deployment can sit *beneath* the gateway as one more provider endpoint - a
+registry entry plus a credential, no code. Two caveats belong in that decision when someone makes
+it: the gateway requires an absolute HTTPS endpoint, so a plain `http://localhost:4000` proxy will
+not load; and LiteLLM's own routing and fallback should be disabled, one alias per gateway registry
+entry. Otherwise two layers perform failover independently and the gateway's deployment-level
+provenance stops being true - it would record the deployment it selected while LiteLLM silently
+served a different one, which would quietly invalidate the evidence-driven ranking built on those
+records.
+
+**Consequences.** No behavior change: this service still has no outbound network dependency and no
+credentials to manage. The filename is retained so existing references keep resolving, even though
+it now names a system this decision no longer points at.
+
+Note that the chain above is not yet operational end to end. The gateway does not forward the
+signed runtime-authorization envelope to this service, so a deployment running with
+`RUNTIME_AUTHORIZATION_REQUIRED=true` answers it `403` and the gateway fails closed before any
+provider call. That gap is tracked on the gateway's roadmap, not here.
