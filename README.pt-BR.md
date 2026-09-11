@@ -2,16 +2,21 @@
 
 [![Quality](https://github.com/brunovicco/policy-model-router/actions/workflows/quality.yml/badge.svg)](https://github.com/brunovicco/policy-model-router/actions/workflows/quality.yml)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Imagem de container](https://img.shields.io/badge/ghcr.io-policy--model--router-2496ED?logo=docker&logoColor=white)](https://github.com/brunovicco/policy-model-router/pkgs/container/policy-model-router)
 
 Read this in [English](README.md).
 
-Um serviço de roteamento determinístico e *fail-closed* que seleciona um grupo de modelo aprovado
-para uma carga de trabalho de LLM antes da inferência.
+Um serviço de aplicação de política em tempo de execução, *fail-closed*, que seleciona um grupo de
+modelo aprovado para uma carga de trabalho de LLM antes da inferência.
 
-O roteador mantém a escolha do modelo fora dos prompts dos agentes e do código de aplicação. Um
-chamador descreve a carga de trabalho, a classificação de dados, o tamanho de contexto e os
-limites operacionais; `POST /route` avalia essa requisição contra uma política versionada e
-retorna um registro de decisão explicável ou uma rejeição explícita. O serviço não chama um LLM.
+O roteador mantém a escolha do modelo e a autorização de runtime fora dos prompts dos agentes e do
+código de aplicação. Um chamador descreve a carga de trabalho, a classificação de dados, o tamanho
+de contexto e os limites operacionais; `POST /route` avalia essa requisição contra uma política
+versionada e retorna um registro de decisão explicável ou uma rejeição explícita. Deployments
+governados podem ainda exigir autorização de runtime assinada e consumir estado de controle de
+runtime, como um botão de parada de emergência, antes de permitir que a requisição prossiga. O
+serviço não chama um LLM.
 
 ## Por que este projeto existe
 
@@ -35,6 +40,29 @@ O Policy Model Router centraliza essa fronteira:
 O valor selecionado é um grupo de modelo lógico, como `reasoning-medium`, não um provedor ou um
 deployment específico. A seleção de provedor, o failover, as credenciais e a chamada de inferência
 em si pertencem a um gateway de modelos posterior na cadeia.
+
+### Onde isto se encaixa: o roteador é o PDP
+
+Este serviço é o **Policy Decision Point**. O projeto irmão
+[governed-llm-gateway](https://github.com/brunovicco/governed-llm-gateway) é o **Policy Enforcement
+Point**: ele recebe a decisão produzida aqui, intersecta com o próprio registro de deployments e
+executa a chamada ao provedor. O vínculo entre os dois é versionado contra o schema de wire `1.0`
+de `POST /route` e está documentado no lado do gateway em
+[`docs/architecture/PDP_PEP_CONTRACT_DRAFT.md`](https://github.com/brunovicco/governed-llm-gateway/blob/main/docs/architecture/PDP_PEP_CONTRACT_DRAFT.md).
+
+O invariante entre os dois é unidirecional:
+
+```text
+conjunto permitido pelo Gateway  ⊆  conjunto autorizado pelo Policy Router
+```
+
+O gateway pode rejeitar mais deployments do que este roteador autorizou. Ele nunca pode ampliar nem
+sintetizar autorização. É por isso que uma rejeição aqui carrega a mesma proveniência de uma
+aceitação: o ponto de aplicação precisa conseguir provar *qual* política negou uma chamada, não
+apenas que algo negou.
+
+Cada serviço roda sem o outro - este roteador não tem dependência do gateway, e suas decisões fazem
+sentido para qualquer consumidor que respeite o mesmo invariante.
 
 ## Como o roteamento funciona
 
@@ -199,7 +227,7 @@ Exemplo de resposta:
   "policy_id": "credit-desk-routing",
   "policy_version": "1.0.0",
   "policy_digest": "sha256:2f1a...c9",
-  "service_version": "0.3.0",
+  "service_version": "0.5.0",
   "environment": "production"
 }
 ```
@@ -245,7 +273,7 @@ política incluída. O roteador não promove silenciosamente a requisição para
     "policy_id": "credit-desk-routing",
     "policy_version": "1.0.0",
     "policy_digest": "sha256:2f1a...c9",
-    "service_version": "0.3.0",
+    "service_version": "0.5.0",
     "environment": "production"
   }
 }
@@ -268,7 +296,7 @@ ser positivos.
 | `schema_version` | Exatamente `1.0` |
 | `requested_at` | Timestamp UTC |
 | `workflow_id`, `task_id`, `agent_name` | Strings não vazias, com no máximo 200 caracteres |
-| `workload` | `document_extraction`, `cashflow_analysis`, `findings_correlation`, `opinion_drafting` ou `json_repair` |
+| `workload` | Qualquer identificador definido por política: 1-128 caracteres minúsculos de `a-z0-9._-`, começando e terminando em alfanumérico. Novas cargas de trabalho devem ser qualificadas por namespace (`rag.answer`); os cinco nomes 0.x da mesa de crédito seguem válidos sem qualificação. Uma carga de trabalho sintaticamente válida que a política ativa não declara **não** é rejeitada pelo schema - ela chega à fronteira de política e falha fechado ali (veja a [ADR-0015](docs/adr/0015-policy-defined-workload-and-model-group-identifiers.md) e o [guia de migração](docs/MIGRATION_TO_GENERIC_POLICY.md)) |
 | `risk_level` | `low`, `medium`, `high` ou `critical` |
 | `data_classification` | `public`, `internal`, `confidential` ou `restricted` |
 | `context_tokens_estimated` | Inteiro entre zero e 10.000.000 (tokens de entrada/prompt) |
@@ -292,7 +320,8 @@ Os códigos de erro estáveis são:
 | 422 | `invalid_request` | A requisição não corresponde ao contrato |
 | 422 | `no_viable_model_group` | O grupo mapeado para a carga de trabalho falhou em uma restrição rígida |
 | 429 | `rate_limit_exceeded` | Excesso de requisições para o par `(IP do cliente, agent_name)` |
-| 500 | `misconfigured_routing_policy` | A política em execução não tem mapeamento para uma carga de trabalho reconhecida |
+| 403 | *(um código de negação de runtime, limitado)* | A autorização de runtime assinada ou o controle de runtime rejeitou a requisição; o corpo também traz um envelope `violation` (veja [Autorização de runtime](#autorização-de-runtime-e-controles-de-governança)) |
+| 500 | `misconfigured_routing_policy` | A política ativa não declara regra para a carga de trabalho solicitada |
 
 Uma política YAML ausente, malformada, com campos desconhecidos ou incompleta impede o serviço de
 iniciar.
@@ -368,6 +397,129 @@ ao endereço do proxy) - nunca confie em headers repassados vindos de um conjunt
 peers, ou qualquer cliente poderia forjar o header e multiplicar sua cota. Veja a
 [segunda emenda da ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md) para o racional completo.
 
+## Autorização de runtime e controles de governança
+
+Tudo acima é a fronteira de política do próprio roteador. Um deployment governado pode exigir,
+adicionalmente, que cada requisição chegue dentro de um **escopo de runtime assinado** emitido por
+uma autoridade de Governança externa, e que uma parada de emergência seja respeitada antes de
+qualquer decisão. Os dois estão **desligados por padrão** e são **obrigatórios em
+`staging`/`production`** - `APP_ENV` com esses valores e `RUNTIME_AUTHORIZATION_REQUIRED=false`
+impede o serviço de subir.
+
+Com a aplicação ligada, `POST /route` recebe um corpo encapsulado em vez da requisição pura:
+
+```json
+{
+  "request": { "schema_version": "1.0", "workload": "cashflow_analysis", "...": "..." },
+  "authorization": {
+    "protected": { "typ": "application/vnd.verifiable-ai-governance.runtime-authorization+json",
+                   "alg": "Ed25519", "kid": "governance-key-2026a" },
+    "claims": { "authorization_id": "...", "issuer": "...", "audience": ["policy-model-router"],
+                "issued_at": "...", "not_before": "...", "expires_at": "...",
+                "subject": { "agent_id": "...", "agent_version": 3, "...": "..." },
+                "request": { "workflow_id": "...", "task_id": "...", "workload": "...",
+                             "max_cost_usd_micros": 1000000, "...": "..." },
+                "scope": { "risk_tier": "high", "data_classification": "restricted",
+                           "autonomy_level": "a2_prepare_for_approval",
+                           "models": [{ "routing_group": "reasoning-strong",
+                                        "allowed_data_classes": ["restricted"], "...": "..." }],
+                           "kill_switch_enabled": true, "...": "..." },
+                "scope_digest": "<sha256 hex>",
+                "policy": { "policy_id": "...", "policy_digest": "<sha256 hex>", "...": "..." } },
+    "signature": "<base64url sem padding de 64 bytes Ed25519>"
+  }
+}
+```
+
+O envelope é verificado antes do roteamento e conferido de novo depois. Nesta ordem:
+
+1. **Identidade e tempo** - emissor, audiência, `issued_at`/`not_before`/`expires_at`, com tempo de
+   vida máximo de dez minutos.
+2. **Chave** - resolvida por `kid` exato contra um conjunto de chaves públicas confiáveis, sem
+   fallback; chaves revogadas e janelas de verificação encerradas são rejeitadas.
+3. **Assinatura** - Ed25519 sobre o JSON canônico de `{protected, claims}`, para que os bytes
+   assinados permaneçam byte a byte compatíveis com o repositório emissor.
+4. **Vínculo com a requisição** - onze fatos da requisição precisam bater com os claims assinados,
+   de modo que uma autorização não possa ser reaproveitada para uma requisição diferente, mais
+   barata ou de risco menor.
+5. **Vínculo com o agente** - o `agent_name` que chama precisa mapear para o `agent_id` assinado
+   pela Governança.
+6. **Proveniência de política** - os IDs, versões e digests da política e do catálogo de controles
+   assinados precisam ser os que este deployment confia.
+7. **Controle de runtime** - o botão de parada e o piso de revogação, lidos de uma projeção da
+   Governança (veja abaixo).
+8. **Uso único** - o `authorization_id` é consumido atomicamente; uma repetição é negada.
+9. **Modelo selecionado** - *depois* do roteamento, o grupo que este roteador selecionou precisa
+   constar do escopo assinado e estar assinado para a classificação de dados da requisição.
+
+Cada etapa falha fechado com um código limitado e legível por máquina, e uma negação retorna `403`
+com um envelope `violation` de conteúdo minimizado - um evento vinculado por digest, com a
+categoria, o código, o estado da autorização e apenas identificadores estruturais. Ele nunca copia
+prompts, cabeçalhos, credenciais ou conteúdo da requisição.
+
+```json
+{
+  "error": { "code": "selected_model_group_not_authorized",
+             "message": "runtime authorization denied" },
+  "violation": {
+    "event": { "schema_version": "1.0", "event_id": "...", "occurred_at": "...",
+               "source_service": "policy-model-router", "enforcement_action": "blocked",
+               "category": "model_scope", "code": "selected_model_group_not_authorized",
+               "correlation_id": "...", "authorization": { "state": "verified", "...": "..." },
+               "request": { "workflow_id": "...", "task_id": "...", "agent_name": "...",
+                            "workload": "..." },
+               "selected_model_group": "reasoning-strong" },
+    "event_digest": "<sha256 hex>"
+  }
+}
+```
+
+As categorias de violação são `authorization`, `replay`, `request_binding`,
+`governance_provenance` e `model_scope`. Os códigos de negação estão listados em
+[`docs/runtime-authorization-operations.md`](docs/runtime-authorization-operations.md).
+
+### Controle de runtime: parada de emergência e piso de revogação
+
+`RUNTIME_CONTROL_REQUIRED=true` faz o roteador ler uma projeção Redis somente leitura, de
+propriedade da Governança, antes de consumir a autorização. Ele nega quando o snapshot indica que a
+parada de emergência está acionada, quando a versão assinada do agente é igual ou inferior ao piso
+de revogação, ou quando a projeção está ausente ou inacessível - a ausência de estado é uma
+negação, não um permitir por padrão. O controle de runtime exige autorização de runtime assinada;
+habilitá-lo sozinho é erro de inicialização. Veja
+[`docs/runtime-kill-switch-enforcement.md`](docs/runtime-kill-switch-enforcement.md) e o
+[modelo de ameaças](docs/runtime-kill-switch-threat-model.md).
+
+### Configurações
+
+Todas são opcionais enquanto a aplicação está desligada. Valores operacionais e uma ordem de
+rollout estão em
+[`docs/runtime-authorization-operations.md`](docs/runtime-authorization-operations.md).
+
+| Variável de ambiente | Padrão | Finalidade |
+|---|---|---|
+| `RUNTIME_AUTHORIZATION_REQUIRED` | `false` | Chave mestra. Precisa ser `true` em `staging`/`production` |
+| `RUNTIME_AUTHORIZATION_ISSUER` | `verifiable-ai-governance:production` | Identidade do assinante confiável |
+| `RUNTIME_AUTHORIZATION_AUDIENCE` | `policy-model-router` | Valor de audiência deste serviço |
+| `RUNTIME_AUTHORIZATION_TRUSTED_KEY_SET_PATH` | *(não definido)* | Conjunto de chaves Ed25519 públicas; obrigatório com a aplicação ligada |
+| `RUNTIME_AUTHORIZATION_AGENT_BINDINGS_JSON` | `{}` | Objeto JSON mapeando `agent_name` para o UUID do agente na Governança |
+| `RUNTIME_AUTHORIZATION_EXPECTED_POLICY_ID` | `baseline-governance-policy` | Identidade da política de Governança que este deployment confia |
+| `RUNTIME_AUTHORIZATION_EXPECTED_POLICY_VERSION` | `1.0.0` | Versão confiável da política de Governança |
+| `RUNTIME_AUTHORIZATION_EXPECTED_POLICY_DIGEST` | *(não definido)* | SHA-256 minúsculo; obrigatório com a aplicação ligada |
+| `RUNTIME_AUTHORIZATION_EXPECTED_CONTROL_CATALOG_ID` | `verifiable-ai-governance-baseline` | Identidade confiável do catálogo de controles |
+| `RUNTIME_AUTHORIZATION_EXPECTED_CONTROL_CATALOG_VERSION` | `1.0.0` | Versão confiável do catálogo de controles |
+| `RUNTIME_AUTHORIZATION_EXPECTED_CONTROL_CATALOG_DIGEST` | *(não definido)* | SHA-256 minúsculo; obrigatório com a aplicação ligada |
+| `RUNTIME_AUTHORIZATION_CLOCK_SKEW_SECONDS` | `0` | Desvio de relógio tolerado, `0`-`60` |
+| `RUNTIME_AUTHORIZATION_MAX_KEY_SET_BYTES` | `262144` | Limite do arquivo de chaves |
+| `RUNTIME_AUTHORIZATION_REPLAY_KEY_PREFIX` | `policy-model-router:runtime-auth:` | Namespace Redis do consumo antirrepetição |
+| `RUNTIME_AUTHORIZATION_REPLAY_MAX_ENTRIES` | `10000` | Limite do guard antirrepetição em memória (só local/teste; `REDIS_URL` é obrigatório em `staging`/`production`) |
+| `RUNTIME_CONTROL_REQUIRED` | `false` | Aplica a parada de emergência e o piso de revogação. Precisa ser `true` em `staging`/`production` |
+| `RUNTIME_CONTROL_REDIS_KEY_PREFIX` | `verifiable-ai-governance:runtime-control:v1:agent:` | Namespace compartilhado com a Governança |
+| `RUNTIME_CONTROL_MAX_SNAPSHOT_BYTES` | `4096` | Limite de um snapshot da projeção |
+| `RUNTIME_CONTROL_TIMEOUT_SECONDS` | `2.0` | Timeout de conexão/leitura do Redis da projeção |
+
+O tracing distribuído nesta fronteira dá continuidade ao contexto de trace W3C do chamador; veja
+[`docs/runtime-tracing.md`](docs/runtime-tracing.md).
+
 ## Disponibilidade
 
 `ModelGroupProfile.available` em `config/routing_policy.yaml` é um flag estático, editado à mão. A
@@ -391,10 +543,17 @@ padrão de processo/Python que o registry do `prometheus_client` sempre expõe),
 | `policy_model_router_route_duration_seconds` | Histogram | `workload` | Tempo gasto avaliando uma decisão de roteamento |
 | `policy_model_router_rate_limit_decisions_total` | Counter | `tier` (`per_ip`, `per_agent`), `outcome` (`allowed`, `blocked`) | Decisões de admissão/bloqueio do rate limiter |
 | `policy_model_router_rate_limiter_backend_unavailable_total` | Counter | - | Requisições em que o rate limiter com Redis falhou aberto porque o Redis estava inacessível |
+| `policy_model_router_runtime_authorization_total` | Counter | `outcome` (`verified`, `denied`, `legacy_dev`) | Verificações de autorização de runtime assinada |
+| `policy_model_router_runtime_violations_total` | Counter | `category`, `code` | Violações de runtime com falha fechada, por categoria e código limitados |
 
 Monitore `increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (somado
 entre réplicas) para detectar uma indisponibilidade prolongada do Redis em vez de depender só da
 linha de log `rate_limiter_backend_unavailable`.
+
+O label `workload` carrega a carga de trabalho solicitada apenas quando a política ativa a declara.
+Como as cargas de trabalho passaram a ser identificadores fornecidos pelo chamador (ADR-0015),
+qualquer outro valor seria cardinalidade ilimitada, então toda carga não declarada é reportada como
+`workload="undeclared"`. Os logs estruturados seguem carregando o valor literal para depuração.
 
 Toda chamada a `POST /route` também emite uma linha de log estruturada `routing_decision`
 (`outcome=accepted` ou `outcome=rejected`) contendo `routing_decision_id`, `correlation_id`,
@@ -446,13 +605,20 @@ adapters    -> application/domain
 domain      -> no outer layer
 ```
 
-- `domain`: vocabulários fechados, objetos de valor de política, requisições e decisões de
-  roteamento, e predicados de restrição puros;
+- `domain`: vocabulários controlados (classificação de dados, nível de risco, códigos de razão),
+  identificadores definidos por política já validados, objetos de valor de política, requisições e
+  decisões de roteamento, e predicados de restrição puros;
 - `application`: caso de uso de roteamento determinístico e ports de clock/ID/disponibilidade;
 - `adapters`: carregador de política YAML, clock do sistema, gerador de UUID, provedor estático de
   disponibilidade, rate limiter em memória (padrão) e rate limiter opcional com Redis;
-- `entrypoints`: contratos Pydantic de wire, endpoints FastAPI (`/route`, `/health`, `/readyz`),
-  mapeamento de erros e logging estruturado.
+- `entrypoints`: contratos Pydantic de wire, endpoints FastAPI (`/route`, `/health`, `/readyz`,
+  `/metrics`), configurações, mapeamento de erros e logging estruturado.
+
+Os módulos de aplicação em runtime - o contrato e o verificador de autorização assinada, o leitor de
+controle de runtime e o construtor de evidência de violação - hoje ficam na raiz do pacote, fora de
+uma camada, e ainda não são cobertos pelo gate de arquitetura. Isso está registrado como débito
+conhecido em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#known-gaps), não como posicionamento
+decidido.
 
 A política é carregada uma única vez na inicialização, e o tratamento de requisições é *stateless*.
 Veja [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) para as regras de dependência e diagramas, e o
@@ -462,8 +628,15 @@ provedor ([ADR-0004](docs/adr/0004-litellm-provider-boundary.md)), o algoritmo d
 ([ADR-0006](docs/adr/0006-availability-provider-port.md)), o endurecimento da fronteira HTTP
 ([ADR-0007](docs/adr/0007-http-boundary-hardening.md)), o rate limiter compartilhado opcional
 ([ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md)), a proveniência da decisão
-([ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md)) e a estimativa de custo por
-token ([ADR-0010](docs/adr/0010-token-based-cost-estimation.md)) são como são.
+([ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md)), a estimativa de custo por
+token ([ADR-0010](docs/adr/0010-token-based-cost-estimation.md)), os limites HTTP pré-parse
+([ADR-0011](docs/adr/0011-http-boundary-pre-parse-limits.md)), a autorização de runtime assinada
+([ADR-0012](docs/adr/0012-signed-runtime-authorization.md)), a evidência estruturada de violação
+([ADR-0013](docs/adr/0013-structured-runtime-violation-evidence.md)), a continuidade de trace W3C
+([ADR-0013, tracing](docs/adr/0013-w3c-runtime-trace-context.md)), a aplicação da parada de
+emergência ([ADR-0014](docs/adr/0014-runtime-kill-switch-enforcement.md)) e os identificadores de
+carga de trabalho e grupo de modelo definidos por política
+([ADR-0015](docs/adr/0015-policy-defined-workload-and-model-group-identifiers.md)) são como são.
 
 ## Escopo atual
 
@@ -477,7 +650,12 @@ O MVP intencionalmente não:
 - aplica fallback quando o grupo mapeado para a carga de trabalho é rejeitado;
 - fornece um IAM completo: `API_KEYS` por agente autentica um `agent_name` reivindicado, mas sem
   expiração, escopo ou garantia de identidade além de "sabia a chave certa" (veja
-  [Autenticação e rate limiting](#autenticação-e-rate-limiting));
+  [Autenticação e rate limiting](#autenticação-e-rate-limiting)). A autorização de runtime assinada
+  é a fronteira mais forte e já está disponível, mas ela autentica o *escopo de Governança de uma
+  requisição*, não o chamador de transporte - não substitui mTLS ou OAuth2 client credentials na
+  borda;
+- recarrega a política de roteamento sem reiniciar: ela é lida uma única vez na inicialização, então
+  mudar um mapeamento ou marcar um grupo como indisponível exige um novo deploy;
 - compartilha o estado de rate limit entre réplicas *por padrão*; isso exige habilitar `REDIS_URL`,
   o que por sua vez adiciona o Redis como uma dependência de infraestrutura real, com sua própria
   disponibilidade a gerenciar.
