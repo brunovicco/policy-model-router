@@ -76,6 +76,14 @@ P1_4_RUNTIME_VIOLATION_EVENTS = True
 P1_5_DISTRIBUTED_RUNTIME_TRACING = True
 P1_6_RUNTIME_KILL_SWITCH_ENFORCEMENT = True
 _MAX_CORRELATION_ID_LENGTH = 200
+# Metric label used in place of a workload the active policy does not declare. Since ADR-0015 the
+# wire accepts any syntactically valid identifier, so the requested workload is caller-controlled
+# and unbounded; a Prometheus label built straight from it would let one caller create unbounded
+# child metrics that are never reclaimed. Collapsing every undeclared workload onto this single
+# label bounds the three route metrics below to the size of the loaded policy, plus one. The
+# *logs* still carry the verbatim workload - they are not a bounded-cardinality surface, and an
+# operator debugging a misrouted caller needs the real value.
+_UNDECLARED_WORKLOAD_LABEL = "undeclared"
 
 ROUTE_DECISIONS_TOTAL = Counter(
     "policy_model_router_route_decisions_total",
@@ -689,11 +697,19 @@ async def route(
         RUNTIME_AUTHORIZATION_TOTAL.labels(outcome="legacy_dev").inc()
 
     workload = route_request.workload.value
+    workload_label = (
+        workload
+        if use_case.declares_workload(route_request.workload)
+        else _UNDECLARED_WORKLOAD_LABEL
+    )
     started_at = time.monotonic()
     try:
         decision = await use_case.route(to_domain_request(route_request))
     except NoViableModelGroupError as exc:
-        ROUTE_REJECTIONS_TOTAL.labels(workload=workload, outcome="no_viable_model_group").inc()
+        ROUTE_REJECTIONS_TOTAL.labels(
+            workload=workload_label,
+            outcome="no_viable_model_group",
+        ).inc()
         logger.info(
             "routing_decision",
             outcome="rejected",
@@ -708,10 +724,22 @@ async def route(
         )
         raise
     except IncompleteRoutingPolicyError:
-        ROUTE_REJECTIONS_TOTAL.labels(workload=workload, outcome="misconfigured_policy").inc()
+        ROUTE_REJECTIONS_TOTAL.labels(
+            workload=workload_label,
+            outcome="misconfigured_policy",
+        ).inc()
+        logger.info(
+            "routing_decision",
+            outcome="rejected",
+            workload=workload,
+            reason_code="workload_not_declared_by_policy",
+            duration_ms=round((time.monotonic() - started_at) * 1000, 3),
+        )
         raise
     finally:
-        ROUTE_DURATION_SECONDS.labels(workload=workload).observe(time.monotonic() - started_at)
+        ROUTE_DURATION_SECONDS.labels(workload=workload_label).observe(
+            time.monotonic() - started_at,
+        )
 
     if verified_authorization is not None:
         http_request.state.runtime_violation_selected_model_group = (
@@ -723,7 +751,8 @@ async def route(
         )
 
     ROUTE_DECISIONS_TOTAL.labels(
-        workload=workload, model_group=decision.selected_model_group.value
+        workload=workload_label,
+        model_group=decision.selected_model_group.value,
     ).inc()
     logger.info(
         "routing_decision",
