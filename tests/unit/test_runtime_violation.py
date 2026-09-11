@@ -8,7 +8,7 @@ from policy_model_router.domain.enums import (
     RiskLevel,
     Workload,
 )
-from policy_model_router.entrypoints.contracts import ModelRouteRequest
+from policy_model_router.domain.routing import RouteRequest
 from policy_model_router.entrypoints.runtime_violation import (
     build_runtime_violation,
     violation_category,
@@ -20,8 +20,8 @@ from policy_model_router.entrypoints.runtime_violation_contract import (
 )
 
 
-def _request() -> ModelRouteRequest:
-    return ModelRouteRequest(
+def _request() -> RouteRequest:
+    return RouteRequest(
         schema_version="1.0",
         requested_at=datetime(2026, 8, 7, 20, 0, tzinfo=UTC),
         workflow_id="credit-analysis-2026-001",

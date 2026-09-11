@@ -43,7 +43,9 @@ from policy_model_router.application.route_model import (
     IncompleteRoutingPolicyError,
     RouteModelUseCase,
 )
+from policy_model_router.application.runtime_authorization import RuntimeAuthorizationVerifier
 from policy_model_router.domain.routing import NoViableModelGroupError
+from policy_model_router.domain.runtime_authorization import RuntimeAuthorizationError
 from policy_model_router.entrypoints.contracts import (
     AuthorizedModelRouteRequest,
     ModelRouteDecision,
@@ -63,10 +65,8 @@ from policy_model_router.entrypoints.runtime_authorization_settings import (
     RuntimeAuthorizationSettings,
 )
 from policy_model_router.entrypoints.runtime_control_settings import RuntimeControlSettings
-from policy_model_router.entrypoints.settings import Settings
-from policy_model_router.application.runtime_authorization import RuntimeAuthorizationVerifier
-from policy_model_router.domain.runtime_authorization import RuntimeAuthorizationError
 from policy_model_router.entrypoints.runtime_violation import build_runtime_violation
+from policy_model_router.entrypoints.settings import Settings
 
 _SERVICE_NAME = "policy-model-router"
 P1_3_RUNTIME_AUTHORIZATION_ENFORCEMENT = True
