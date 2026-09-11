@@ -529,6 +529,12 @@ camada de aplicação resolve esse valor através de um port `AvailabilityProvid
 saúde em tempo real de provedor/gateway - o port existe para que um adapter real possa ser
 adicionado depois, sem alterar o caso de uso de roteamento nem as restrições de domínio.
 
+O port resolve todo o conjunto de candidatos em uma única chamada por requisição, então um adapter
+que faça I/O de verdade pode agrupar, cachear e limitar um único timeout para todos os grupos, em
+vez de pagar esses custos por grupo. Um grupo que esse adapter omitir da resposta é tratado como
+indisponível, e não volta ao flag da política: um provedor degradado não pode acabar mais permissivo
+que uma negação explícita.
+
 ## Saúde, prontidão e métricas
 
 `GET /health` sempre retorna `200 {"status": "ok"}` assim que o processo está servindo requisições.

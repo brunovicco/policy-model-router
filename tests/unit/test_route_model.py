@@ -6,7 +6,7 @@ by ``tests/unit/test_routing_policy_loader.py``.
 """
 
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -305,9 +305,22 @@ async def test_route_rejects_the_mapped_group_when_risk_level_is_not_authorized(
 class _AlwaysUnavailable:
     """Availability provider stub that overrides every group to unavailable."""
 
-    async def is_available(self, _model_group: ModelGroup, _declared_available: bool) -> bool:
-        """Always report unavailable, regardless of the policy's declared flag."""
-        return False
+    async def resolve(self, declared: Mapping[ModelGroup, bool]) -> Mapping[ModelGroup, bool]:
+        """Report every requested group as unavailable, whatever the policy declared."""
+        return dict.fromkeys(declared, False)
+
+
+class _OmitsEveryGroup:
+    """Availability provider stub that answers nothing at all.
+
+    Stands in for a degraded live-health adapter. The use case must treat an omitted group as
+    unavailable rather than falling back to the policy's declared flag, so that a provider outage
+    can never widen the authorized set.
+    """
+
+    async def resolve(self, _declared: Mapping[ModelGroup, bool]) -> Mapping[ModelGroup, bool]:
+        """Return no groups at all."""
+        return {}
 
 
 @pytest.mark.anyio
@@ -319,6 +332,33 @@ async def test_route_rejects_a_group_the_availability_provider_marks_unavailable
         clock=_FixedClock(),
         id_generator=_FixedIdGenerator(),
         availability=_AlwaysUnavailable(),
+        service_version=_TEST_SERVICE_VERSION,
+        environment=_TEST_ENVIRONMENT,
+    )
+    request = make_request(workload=Workload.CASHFLOW_ANALYSIS, max_latency_ms=60_000)
+
+    with pytest.raises(NoViableModelGroupError) as excinfo:
+        await use_case.route(request)
+
+    assert excinfo.value.decision.rejected_model_group == ModelGroup.REASONING_MEDIUM
+    assert "unavailable" in excinfo.value.decision.reason
+
+
+@pytest.mark.anyio
+async def test_route_treats_a_group_the_provider_omitted_as_unavailable(
+    reference_policy: RoutingPolicy, make_request: MakeRequest
+) -> None:
+    """A degraded provider must not be able to widen the authorized set.
+
+    The port resolves the whole candidate set in one call, so a provider that answers partially -
+    a live-health adapter mid-outage, say - leaves groups unaccounted for. Falling back to the
+    policy's declared flag there would make an outage *more* permissive than an explicit denial.
+    """
+    use_case = RouteModelUseCase(
+        reference_policy,
+        clock=_FixedClock(),
+        id_generator=_FixedIdGenerator(),
+        availability=_OmitsEveryGroup(),
         service_version=_TEST_SERVICE_VERSION,
         environment=_TEST_ENVIRONMENT,
     )

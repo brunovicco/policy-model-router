@@ -68,3 +68,34 @@ without a second signature migration. `tests/unit/test_availability.py` and
 `tests/unit/test_route_model.py` were updated to `await` accordingly; this is a purely mechanical
 consequence of async propagating through the call chain, the same kind of change ADR-0008 made to
 `RateLimiter.allow`/`ping`.
+
+## Amendment (2026-09-11): the port resolves the whole candidate set in one call
+
+The same review that made the port `async` left it resolving one group at a time:
+`is_available(model_group, declared_available)`, awaited inside the use case's loop over every
+declared model group. With `StaticAvailabilityProvider` that is free. With the adapter this port
+exists for - one that polls a provider or gateway health endpoint - it is N sequential network
+round trips on the hot path of every routing decision, and the router that exists to be cheap
+would inherit the gateway's latency, multiplied by the size of the policy.
+
+**Decision.** The port becomes
+`resolve(declared: Mapping[ModelGroupId, bool]) -> Mapping[ModelGroupId, bool]`. The use case
+builds the declared map once per request, awaits a single call, and reads each group's effective
+flag out of the result. `StaticAvailabilityProvider.resolve` returns `declared` unchanged -
+identical behavior to before.
+
+A group the implementation omits from its answer is treated as **unavailable**, not as its
+declared value. A live-health adapter that is itself degraded will answer partially, and falling
+back to the policy's flag there would make an outage more permissive than an explicit denial - the
+opposite of every other failure path in this service. The rule is stated on the port and covered
+by a test using a provider stub that answers nothing.
+
+**Consequences.** No behavior change today, same as the original ADR and its first amendment. A
+future adapter can now batch, cache with a TTL, and bound a single timeout across the whole
+candidate set, rather than having each of those concerns multiplied per group - and it can do so
+without a third signature migration. This ADR still only authorizes the seam, not the integration.
+
+The port deliberately does **not** gain a rule that the policy's declared flag is a ceiling, so a
+provider can still report a declared-unavailable group as available. Changing that is a semantic
+decision about who owns availability, not a consequence of the call shape, and belongs in the ADR
+that introduces the first real adapter.
