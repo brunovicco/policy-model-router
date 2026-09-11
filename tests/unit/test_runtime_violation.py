@@ -9,11 +9,11 @@ from policy_model_router.domain.enums import (
     Workload,
 )
 from policy_model_router.entrypoints.contracts import ModelRouteRequest
-from policy_model_router.runtime_violation import (
+from policy_model_router.entrypoints.runtime_violation import (
     build_runtime_violation,
     violation_category,
 )
-from policy_model_router.runtime_violation_contract import (
+from policy_model_router.entrypoints.runtime_violation_contract import (
     RuntimeViolationAuthorizationState,
     RuntimeViolationCategory,
     RuntimeViolationEnvelope,

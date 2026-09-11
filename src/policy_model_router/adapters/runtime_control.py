@@ -1,58 +1,17 @@
-"""Read and enforce Governance runtime-control snapshots at the Router boundary."""
+"""Adapters for the Governance runtime-control projection.
+
+Both stores implement the application's :class:`RuntimeControlStore` port and are strictly
+read-only: the Router consumes a projection Governance owns and never writes to it.
+"""
 
 import json
-from dataclasses import dataclass
-from enum import StrEnum
-from typing import Any, Protocol
-from uuid import UUID
+from typing import Any
 
-
-class RuntimeControlState(StrEnum):
-    """Effective runtime execution state projected by Governance."""
-
-    INACTIVE = "inactive"
-    ACTIVE = "active"
-
-
-class RuntimeControlStoreError(RuntimeError):
-    """Raised when the runtime-control projection cannot be trusted."""
-
-
-class RuntimeControlEnforcementError(RuntimeError):
-    """Fail-closed runtime-control denial with a stable machine-readable code."""
-
-    def __init__(self, code: str, message: str) -> None:
-        """Store the denial ``code`` without exposing backend details."""
-        super().__init__(message)
-        self.code = code
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeControlSnapshot:
-    """Exact P1.6a projection consumed by the Router."""
-
-    agent_id: str
-    control_epoch: int
-    state: RuntimeControlState
-    revoked_through_agent_version: int
-    transition_id: str | None
-    schema_version: str = "1.0"
-
-
-class RuntimeControlStore(Protocol):
-    """Read-only projection boundary owned by the Router."""
-
-    async def read(self, agent_id: str) -> RuntimeControlSnapshot | None:
-        """Read the current snapshot for one signed Governance agent ID."""
-        ...
-
-    async def ping(self) -> None:
-        """Raise when the projection backend is unavailable."""
-        ...
-
-    async def close(self) -> None:
-        """Release projection resources."""
-        ...
+from policy_model_router.domain.runtime_control import (
+    RuntimeControlSnapshot,
+    RuntimeControlState,
+    RuntimeControlStoreError,
+)
 
 
 class InMemoryRuntimeControlStore:
@@ -126,64 +85,6 @@ class RedisRuntimeControlStore:
             await close()
 
 
-class RuntimeControlEnforcer:
-    """Apply kill-switch and revocation-floor semantics before replay consumption."""
-
-    def __init__(self, store: RuntimeControlStore) -> None:
-        """Bind the trusted read-only projection store."""
-        self._store = store
-
-    async def enforce(self, *, agent_id: UUID, agent_version: int) -> RuntimeControlSnapshot:
-        """Allow only an inactive snapshot whose revocation floor is below the signed version."""
-        try:
-            snapshot = await self._store.read(str(agent_id))
-        except RuntimeControlStoreError as exc:
-            raise RuntimeControlEnforcementError(
-                "runtime_control_unavailable",
-                "Runtime control state is unavailable",
-            ) from exc
-        except Exception as exc:
-            raise RuntimeControlEnforcementError(
-                "runtime_control_unavailable",
-                "Runtime control state is unavailable",
-            ) from exc
-        if snapshot is None:
-            raise RuntimeControlEnforcementError(
-                "runtime_control_unavailable",
-                "Runtime control state is unavailable",
-            )
-        if snapshot.state is RuntimeControlState.ACTIVE:
-            raise RuntimeControlEnforcementError(
-                "kill_switch_engaged",
-                "Governance runtime kill switch is engaged",
-            )
-        if agent_version <= snapshot.revoked_through_agent_version:
-            raise RuntimeControlEnforcementError(
-                "runtime_authorization_revoked",
-                "Runtime authorization predates the current Governance revocation floor",
-            )
-        return snapshot
-
-    async def ping(self) -> None:
-        """Require the runtime-control backend to be reachable."""
-        try:
-            await self._store.ping()
-        except RuntimeControlStoreError as exc:
-            raise RuntimeControlEnforcementError(
-                "runtime_control_unavailable",
-                "Runtime control state is unavailable",
-            ) from exc
-        except Exception as exc:
-            raise RuntimeControlEnforcementError(
-                "runtime_control_unavailable",
-                "Runtime control state is unavailable",
-            ) from exc
-
-    async def close(self) -> None:
-        """Release runtime-control resources."""
-        await self._store.close()
-
-
 def _parse_snapshot(raw: str, *, expected_agent_id: str) -> RuntimeControlSnapshot:
     try:
         document = json.loads(raw)
@@ -232,3 +133,6 @@ def _parse_snapshot(raw: str, *, expected_agent_id: str) -> RuntimeControlSnapsh
         revoked_through_agent_version=revoked_version,
         transition_id=transition_id,
     )
+
+
+__all__ = ["InMemoryRuntimeControlStore", "RedisRuntimeControlStore"]

@@ -8,24 +8,26 @@ from uuid import UUID
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from policy_model_router.runtime_authorization import (
+from policy_model_router.application.runtime_authorization import RuntimeAuthorizationVerifier
+from policy_model_router.domain.runtime_authorization import (
     RuntimeAuthorizationError,
     RuntimeAuthorizationKeyStatus,
-    RuntimeAuthorizationVerifier,
     TrustedRuntimeAuthorizationKey,
     TrustedRuntimeAuthorizationKeySet,
 )
-from policy_model_router.runtime_control import (
+from policy_model_router.adapters.runtime_control import (
     InMemoryRuntimeControlStore,
     RedisRuntimeControlStore,
+)
+from policy_model_router.application.runtime_control import RuntimeControlEnforcer
+from policy_model_router.domain.runtime_control import (
     RuntimeControlEnforcementError,
-    RuntimeControlEnforcer,
     RuntimeControlSnapshot,
     RuntimeControlState,
     RuntimeControlStoreError,
 )
-from policy_model_router.runtime_violation import violation_category
-from policy_model_router.runtime_violation_contract import RuntimeViolationCategory
+from policy_model_router.entrypoints.runtime_violation import violation_category
+from policy_model_router.entrypoints.runtime_violation_contract import RuntimeViolationCategory
 from tests.unit.test_runtime_authorization import AGENT_ID, NOW, _route_request, _signed
 
 

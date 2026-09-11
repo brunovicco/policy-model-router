@@ -7,17 +7,15 @@ from policy_model_router.entrypoints.runtime_authorization_settings import (
     RuntimeAuthorizationSettings,
 )
 from policy_model_router.entrypoints.runtime_control_settings import RuntimeControlSettings
-from policy_model_router.runtime_authorization import (
+from policy_model_router.adapters.runtime_authorization import (
     InMemoryRuntimeAuthorizationReplayGuard,
     RedisRuntimeAuthorizationReplayGuard,
-    RuntimeAuthorizationVerifier,
     load_trusted_key_set,
     parse_agent_bindings,
 )
-from policy_model_router.runtime_control import (
-    RedisRuntimeControlStore,
-    RuntimeControlEnforcer,
-)
+from policy_model_router.application.runtime_authorization import RuntimeAuthorizationVerifier
+from policy_model_router.adapters.runtime_control import RedisRuntimeControlStore
+from policy_model_router.application.runtime_control import RuntimeControlEnforcer
 
 
 class DisabledRuntimeAuthorizationVerifier:

@@ -3,9 +3,11 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from policy_model_router.entrypoints.contracts import ModelRouteRequest
-from policy_model_router.runtime_authorization_contract import SignedRuntimeAuthorization
-from policy_model_router.runtime_violation_contract import (
+from policy_model_router.application.runtime_authorization_contract import (
+    SignedRuntimeAuthorization,
+)
+from policy_model_router.domain.routing import RouteRequest
+from policy_model_router.entrypoints.runtime_violation_contract import (
     RuntimeViolationAuthorizationContext,
     RuntimeViolationAuthorizationState,
     RuntimeViolationCategory,
@@ -53,7 +55,7 @@ def violation_category(code: str) -> RuntimeViolationCategory:
 def build_runtime_violation(
     *,
     code: str,
-    request: ModelRouteRequest,
+    request: RouteRequest,
     authorization: SignedRuntimeAuthorization | None,
     authorization_verified: bool,
     correlation_id: str,

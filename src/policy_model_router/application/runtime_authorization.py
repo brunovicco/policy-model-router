@@ -1,78 +1,40 @@
-"""Verify Governance runtime authorization before deterministic model routing."""
+"""Verify one Governance runtime authorization against a domain routing request.
 
-import asyncio
-import base64
+The verification order is fixed and each step fails closed: identity and time, trusted key,
+Ed25519 signature over canonical claims, request binding, agent binding, policy provenance,
+runtime control, then single-use consumption. ``require_selected_model`` runs afterwards, once the
+routing decision exists.
+
+This module takes the domain :class:`RouteRequest`, not the Pydantic wire model: whether a request
+arrived over HTTP is irrelevant to whether Governance authorized it, and depending on the transport
+schema here would invert the dependency rule (ADR-0001).
+"""
+
 import binascii
-import json
-import math
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
-from enum import StrEnum
-from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 from uuid import UUID
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from policy_model_router.domain.enums import ModelGroup
-from policy_model_router.entrypoints.contracts import ModelRouteRequest
-from policy_model_router.runtime_authorization_contract import (
+from policy_model_router.application.runtime_authorization_contract import (
     RuntimeAuthorizationClaims,
     SignedRuntimeAuthorization,
 )
-from policy_model_router.runtime_control import (
-    RuntimeControlEnforcementError,
-    RuntimeControlEnforcer,
+from policy_model_router.application.runtime_control import RuntimeControlEnforcer
+from policy_model_router.domain.identifiers import ModelGroupId
+from policy_model_router.domain.routing import RouteRequest
+from policy_model_router.domain.runtime_authorization import (
+    RuntimeAuthorizationError,
+    RuntimeAuthorizationKeyStatus,
+    TrustedRuntimeAuthorizationKey,
+    TrustedRuntimeAuthorizationKeySet,
+    decode_signature,
+    require_utc,
 )
-
-
-class RuntimeAuthorizationKeyStatus(StrEnum):
-    """Lifecycle state for one trusted Governance public key."""
-
-    ACTIVE = "active"
-    RETIRING = "retiring"
-    REVOKED = "revoked"
-
-
-class RuntimeAuthorizationError(RuntimeError):
-    """Fail-closed runtime authorization error with a stable code."""
-
-    def __init__(
-        self,
-        code: str,
-        message: str,
-        *,
-        authorization_verified: bool = False,
-    ) -> None:
-        """Store the stable code and whether cryptographic/binding verification completed."""
-        super().__init__(message)
-        self.code = code
-        self.authorization_verified = authorization_verified
-
-
-@dataclass(frozen=True, slots=True)
-class TrustedRuntimeAuthorizationKey:
-    """One trusted Ed25519 verification key."""
-
-    kid: str
-    status: RuntimeAuthorizationKeyStatus
-    public_key: Ed25519PublicKey
-    not_before: datetime
-    verify_until: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class TrustedRuntimeAuthorizationKeySet:
-    """Versioned exact-key trust set."""
-
-    generation: int
-    keys: tuple[TrustedRuntimeAuthorizationKey, ...]
-
-    def resolve(self, kid: str) -> TrustedRuntimeAuthorizationKey | None:
-        """Resolve exactly one key ID without fallback."""
-        return next((key for key in self.keys if key.kid == kid), None)
+from policy_model_router.domain.runtime_control import RuntimeControlEnforcementError
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,92 +71,6 @@ class RuntimeAuthorizationReplayGuard(Protocol):
     async def close(self) -> None:
         """Release resources."""
         ...
-
-
-class InMemoryRuntimeAuthorizationReplayGuard:
-    """Bounded process-local replay guard for development and tests."""
-
-    def __init__(self, *, max_entries: int = 10_000) -> None:
-        """Bound the guard to at most ``max_entries`` live authorization IDs."""
-        if max_entries < 1:
-            raise ValueError("max_entries must be positive")
-        self._max_entries = max_entries
-        self._entries: dict[UUID, datetime] = {}
-        self._lock = asyncio.Lock()
-
-    async def consume(
-        self,
-        authorization_id: UUID,
-        *,
-        expires_at: datetime,
-        now: datetime,
-    ) -> bool:
-        """Consume one ID exactly once while it remains live."""
-        async with self._lock:
-            self._entries = {key: expiry for key, expiry in self._entries.items() if expiry > now}
-            if authorization_id in self._entries:
-                return False
-            if len(self._entries) >= self._max_entries:
-                raise RuntimeAuthorizationError(
-                    "replay_store_full",
-                    "Runtime authorization replay store is at capacity",
-                )
-            self._entries[authorization_id] = expires_at
-            return True
-
-    async def ping(self) -> None:
-        """In-memory state is always reachable."""
-        return None
-
-    async def close(self) -> None:
-        """No resources to release."""
-        return None
-
-
-class RedisRuntimeAuthorizationReplayGuard:
-    """Cross-replica replay guard using atomic Redis SET NX EX."""
-
-    def __init__(self, client: Any, *, key_prefix: str) -> None:
-        """Wrap an async Redis ``client``, namespacing keys with ``key_prefix``."""
-        if not key_prefix:
-            raise ValueError("Replay key prefix must not be empty")
-        self._client = client
-        self._key_prefix = key_prefix
-
-    async def consume(
-        self,
-        authorization_id: UUID,
-        *,
-        expires_at: datetime,
-        now: datetime,
-    ) -> bool:
-        """Atomically consume the authorization ID until it expires."""
-        ttl = max(1, math.ceil((expires_at - now).total_seconds()))
-        key = f"{self._key_prefix}{authorization_id}"
-        try:
-            result = await self._client.set(key, "1", nx=True, ex=ttl)
-        except Exception as exc:
-            raise RuntimeAuthorizationError(
-                "replay_store_unavailable",
-                "Runtime authorization replay state is unavailable",
-            ) from exc
-        return bool(result)
-
-    async def ping(self) -> None:
-        """Require the Redis backend to be reachable at startup."""
-        try:
-            await self._client.ping()
-        except Exception as exc:
-            raise RuntimeAuthorizationError(
-                "replay_store_unavailable",
-                "Runtime authorization replay state is unavailable",
-            ) from exc
-
-    async def close(self) -> None:
-        """Close the owned Redis client."""
-        close = getattr(self._client, "aclose", None)
-        if close is not None:
-            await close()
 
 
 class RuntimeAuthorizationVerifier:
@@ -241,12 +117,12 @@ class RuntimeAuthorizationVerifier:
     async def verify(
         self,
         envelope: SignedRuntimeAuthorization,
-        request: ModelRouteRequest,
+        request: RouteRequest,
         *,
         now: datetime,
     ) -> VerifiedRuntimeAuthorization:
         """Verify and atomically consume one authorization."""
-        _require_utc(now)
+        require_utc(now)
         claims = envelope.claims
         self._verify_identity_and_time(claims, now)
         key = self._require_key(envelope, now)
@@ -295,7 +171,7 @@ class RuntimeAuthorizationVerifier:
     def require_selected_model(
         self,
         verified: VerifiedRuntimeAuthorization,
-        selected_model_group: ModelGroup,
+        selected_model_group: ModelGroupId,
     ) -> None:
         """Require the Router-selected group to be explicitly signed by Governance."""
         claims = verified.envelope.claims
@@ -397,7 +273,7 @@ class RuntimeAuthorizationVerifier:
         key: TrustedRuntimeAuthorizationKey,
     ) -> None:
         try:
-            signature = _decode_signature(envelope.signature)
+            signature = decode_signature(envelope.signature)
             key.public_key.verify(signature, envelope.signing_bytes())
         except (InvalidSignature, ValueError, binascii.Error) as exc:
             raise RuntimeAuthorizationError(
@@ -408,7 +284,7 @@ class RuntimeAuthorizationVerifier:
     @staticmethod
     def _verify_request_binding(
         claims: RuntimeAuthorizationClaims,
-        request: ModelRouteRequest,
+        request: RouteRequest,
     ) -> None:
         signed = claims.request
         cost_micros = _cost_micros(request.max_cost_usd)
@@ -471,191 +347,6 @@ class RuntimeAuthorizationVerifier:
             )
 
 
-def load_trusted_key_set(
-    path: Path,
-    *,
-    max_bytes: int = 262_144,
-) -> TrustedRuntimeAuthorizationKeySet:
-    """Load a bounded public-only key set emitted by Governance."""
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise RuntimeAuthorizationError(
-            "key_set_unavailable",
-            "Runtime authorization key set could not be loaded",
-        ) from exc
-    if len(raw) > max_bytes:
-        raise RuntimeAuthorizationError(
-            "key_set_too_large",
-            "Runtime authorization key set exceeds the configured limit",
-        )
-    try:
-        document = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeAuthorizationError(
-            "invalid_key_set",
-            "Runtime authorization key set is invalid",
-        ) from exc
-    return _parse_key_set(document)
-
-
-def _parse_key_set(document: object) -> TrustedRuntimeAuthorizationKeySet:
-    if not isinstance(document, dict):
-        raise RuntimeAuthorizationError("invalid_key_set", "Key set must be an object")
-    if set(document) != {"schema_version", "generation", "keys"}:
-        raise RuntimeAuthorizationError(
-            "invalid_key_set",
-            "Key set contains unsupported fields",
-        )
-    if document["schema_version"] != "1.0":
-        raise RuntimeAuthorizationError(
-            "invalid_key_set",
-            "Unsupported key-set schema version",
-        )
-    generation = document["generation"]
-    entries = document["keys"]
-    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
-        raise RuntimeAuthorizationError("invalid_key_set", "Invalid key-set generation")
-    if not isinstance(entries, list) or not entries:
-        raise RuntimeAuthorizationError("invalid_key_set", "Key set must contain keys")
-
-    keys: list[TrustedRuntimeAuthorizationKey] = []
-    seen: set[str] = set()
-    for entry in entries:
-        key = _parse_key_entry(entry)
-        if key.kid in seen:
-            raise RuntimeAuthorizationError("invalid_key_set", "Duplicate key identifier")
-        seen.add(key.kid)
-        keys.append(key)
-    if not any(key.status is RuntimeAuthorizationKeyStatus.ACTIVE for key in keys):
-        raise RuntimeAuthorizationError(
-            "invalid_key_set",
-            "Key set must contain at least one active key",
-        )
-    return TrustedRuntimeAuthorizationKeySet(
-        generation=generation,
-        keys=tuple(keys),
-    )
-
-
-def _parse_key_entry(entry: object) -> TrustedRuntimeAuthorizationKey:
-    if not isinstance(entry, dict):
-        raise RuntimeAuthorizationError("invalid_key_set", "Key entry must be an object")
-    expected = {"kid", "status", "not_before", "verify_until", "jwk"}
-    if set(entry) != expected:
-        raise RuntimeAuthorizationError(
-            "invalid_key_set",
-            "Key entry contains unsupported fields",
-        )
-    kid = entry["kid"]
-    status = entry["status"]
-    jwk = entry["jwk"]
-    if not isinstance(kid, str) or not kid:
-        raise RuntimeAuthorizationError("invalid_key_set", "Invalid key identifier")
-    try:
-        key_status = RuntimeAuthorizationKeyStatus(status)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeAuthorizationError("invalid_key_set", "Invalid key status") from exc
-    if not isinstance(jwk, dict) or set(jwk) != {"kty", "crv", "x"}:
-        raise RuntimeAuthorizationError("invalid_key_set", "Invalid Ed25519 JWK")
-    if jwk.get("kty") != "OKP" or jwk.get("crv") != "Ed25519":
-        raise RuntimeAuthorizationError(
-            "invalid_key_set",
-            "Only Ed25519 OKP keys are trusted",
-        )
-    x = jwk.get("x")
-    if not isinstance(x, str):
-        raise RuntimeAuthorizationError("invalid_key_set", "Missing Ed25519 public key")
-    try:
-        public_bytes = _decode_base64url(x)
-        public_key = Ed25519PublicKey.from_public_bytes(public_bytes)
-        not_before = _parse_utc(entry["not_before"])
-        verify_until = _parse_utc(entry["verify_until"])
-    except (ValueError, TypeError, binascii.Error) as exc:
-        raise RuntimeAuthorizationError(
-            "invalid_key_set",
-            "Runtime authorization key material is invalid",
-        ) from exc
-    if len(public_bytes) != 32 or verify_until <= not_before:
-        raise RuntimeAuthorizationError(
-            "invalid_key_set",
-            "Runtime authorization key window or size is invalid",
-        )
-    return TrustedRuntimeAuthorizationKey(
-        kid=kid,
-        status=key_status,
-        public_key=public_key,
-        not_before=not_before,
-        verify_until=verify_until,
-    )
-
-
-def parse_agent_bindings(raw_json: str) -> dict[str, UUID]:
-    """Parse exact agent-name to Governance UUID bindings."""
-    try:
-        raw = json.loads(raw_json)
-    except json.JSONDecodeError as exc:
-        raise RuntimeAuthorizationError(
-            "invalid_agent_bindings",
-            "Runtime authorization agent bindings must be valid JSON",
-        ) from exc
-    if not isinstance(raw, dict) or not raw:
-        raise RuntimeAuthorizationError(
-            "invalid_agent_bindings",
-            "Runtime authorization agent bindings must be a non-empty object",
-        )
-    bindings: dict[str, UUID] = {}
-    for agent_name, agent_id in raw.items():
-        if (
-            not isinstance(agent_name, str)
-            or not agent_name
-            or len(agent_name) > 200
-            or not isinstance(agent_id, str)
-        ):
-            raise RuntimeAuthorizationError(
-                "invalid_agent_bindings",
-                "Runtime authorization agent bindings are invalid",
-            )
-        try:
-            parsed = UUID(agent_id)
-        except ValueError as exc:
-            raise RuntimeAuthorizationError(
-                "invalid_agent_bindings",
-                "Runtime authorization agent binding must contain UUIDs",
-            ) from exc
-        bindings[agent_name] = parsed
-    return bindings
-
-
-def _decode_signature(value: str) -> bytes:
-    decoded = _decode_base64url(value)
-    if len(decoded) != 64:
-        raise ValueError("Ed25519 signature must be 64 bytes")
-    return decoded
-
-
-def _decode_base64url(value: str) -> bytes:
-    encoded = value.encode("ascii")
-    padding = b"=" * ((4 - len(encoded) % 4) % 4)
-    return base64.b64decode(encoded + padding, altchars=b"-_", validate=True)
-
-
-def _parse_utc(value: object) -> datetime:
-    if not isinstance(value, str):
-        raise ValueError("timestamp must be a string")
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    _require_utc(parsed)
-    return parsed.astimezone(UTC)
-
-
-def _require_utc(value: datetime) -> None:
-    if value.tzinfo is None or value.utcoffset() != timedelta(0):
-        raise RuntimeAuthorizationError(
-            "invalid_time",
-            "Runtime authorization verification time must be UTC",
-        )
-
-
 def _cost_micros(value: Decimal) -> int:
     micros = value * Decimal(1_000_000)
     integral = micros.to_integral_value()
@@ -665,3 +356,10 @@ def _cost_micros(value: Decimal) -> int:
             "Route cost cannot be represented as integer USD micros",
         )
     return int(integral)
+
+
+__all__ = [
+    "RuntimeAuthorizationReplayGuard",
+    "RuntimeAuthorizationVerifier",
+    "VerifiedRuntimeAuthorization",
+]

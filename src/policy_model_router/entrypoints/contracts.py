@@ -28,7 +28,9 @@ from policy_model_router.domain.identifiers import (
 from policy_model_router.domain.routing import RejectedDecision as DomainRejectedDecision
 from policy_model_router.domain.routing import RouteDecision as DomainRouteDecision
 from policy_model_router.domain.routing import RouteRequest as DomainRouteRequest
-from policy_model_router.runtime_authorization_contract import SignedRuntimeAuthorization
+from policy_model_router.application.runtime_authorization_contract import (
+    SignedRuntimeAuthorization,
+)
 
 
 def _require_utc(value: datetime) -> datetime:

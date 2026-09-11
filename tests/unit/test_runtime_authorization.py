@@ -18,16 +18,20 @@ from policy_model_router.domain.enums import (
     Workload,
 )
 from policy_model_router.entrypoints.contracts import ModelRouteRequest
-from policy_model_router.runtime_authorization import (
+from policy_model_router.adapters.runtime_authorization import (
     InMemoryRuntimeAuthorizationReplayGuard,
-    RuntimeAuthorizationError,
-    RuntimeAuthorizationKeyStatus,
+)
+from policy_model_router.application.runtime_authorization import (
     RuntimeAuthorizationVerifier,
-    TrustedRuntimeAuthorizationKey,
-    TrustedRuntimeAuthorizationKeySet,
     VerifiedRuntimeAuthorization,
 )
-from policy_model_router.runtime_authorization_contract import (
+from policy_model_router.domain.runtime_authorization import (
+    RuntimeAuthorizationError,
+    RuntimeAuthorizationKeyStatus,
+    TrustedRuntimeAuthorizationKey,
+    TrustedRuntimeAuthorizationKeySet,
+)
+from policy_model_router.application.runtime_authorization_contract import (
     AuthorizationAutonomyLevel,
     AuthorizationRiskTier,
     AuthorizedRuntimeModel,

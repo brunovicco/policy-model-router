@@ -64,11 +64,9 @@ from policy_model_router.entrypoints.runtime_authorization_settings import (
 )
 from policy_model_router.entrypoints.runtime_control_settings import RuntimeControlSettings
 from policy_model_router.entrypoints.settings import Settings
-from policy_model_router.runtime_authorization import (
-    RuntimeAuthorizationError,
-    RuntimeAuthorizationVerifier,
-)
-from policy_model_router.runtime_violation import build_runtime_violation
+from policy_model_router.application.runtime_authorization import RuntimeAuthorizationVerifier
+from policy_model_router.domain.runtime_authorization import RuntimeAuthorizationError
+from policy_model_router.entrypoints.runtime_violation import build_runtime_violation
 
 _SERVICE_NAME = "policy-model-router"
 P1_3_RUNTIME_AUTHORIZATION_ENFORCEMENT = True
@@ -647,7 +645,8 @@ async def route(
     authorization = (
         request.authorization if isinstance(request, AuthorizedModelRouteRequest) else None
     )
-    http_request.state.runtime_violation_route_request = route_request
+    domain_request = to_domain_request(route_request)
+    http_request.state.runtime_violation_route_request = domain_request
     http_request.state.runtime_violation_authorization = authorization
     http_request.state.runtime_violation_authorization_verified = False
     http_request.state.runtime_violation_selected_model_group = None
@@ -683,7 +682,7 @@ async def route(
             )
         verified_authorization = await verifier.verify(
             authorization,
-            route_request,
+            domain_request,
             now=SystemClock().now(),
         )
         http_request.state.runtime_violation_authorization_verified = True
@@ -704,7 +703,7 @@ async def route(
     )
     started_at = time.monotonic()
     try:
-        decision = await use_case.route(to_domain_request(route_request))
+        decision = await use_case.route(domain_request)
     except NoViableModelGroupError as exc:
         ROUTE_REJECTIONS_TOTAL.labels(
             workload=workload_label,
