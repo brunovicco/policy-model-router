@@ -3,7 +3,6 @@
 import asyncio
 import base64
 import json
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -49,8 +48,14 @@ NOW = datetime(2026, 8, 7, 18, 0, tzinfo=UTC)
 AGENT_ID = UUID("33333333-3333-4333-8333-333333333333")
 
 
-def _route_request(**updates: object) -> RouteRequest:
-    request = RouteRequest(
+def _route_request(*, max_latency_ms: int = 30_000) -> RouteRequest:
+    """Build the request the signed fixtures below are bound to.
+
+    Only ``max_latency_ms`` is ever varied - by the binding-mismatch test - so it is an explicit
+    typed parameter rather than untyped keyword overrides. Any field a future test needs to vary
+    gets the same treatment, which keeps the helper checkable instead of accepting anything.
+    """
+    return RouteRequest(
         schema_version="1.0",
         requested_at=NOW,
         workflow_id="credit-analysis-2026-001",
@@ -62,10 +67,9 @@ def _route_request(**updates: object) -> RouteRequest:
         context_tokens_estimated=3000,
         max_output_tokens_estimated=900,
         structured_output_required=False,
-        max_latency_ms=30_000,
+        max_latency_ms=max_latency_ms,
         max_cost_usd=Decimal("0.30"),
     )
-    return replace(request, **updates) if updates else request
 
 
 def _claims(**updates: object) -> RuntimeAuthorizationClaims:
