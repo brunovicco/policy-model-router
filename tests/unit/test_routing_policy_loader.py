@@ -30,6 +30,18 @@ _ORPHAN_GROUP = """  canary-next:
     allowed_agents: []
 {staged}"""
 
+
+def _policy_with_orphan_group(*, staged: bool) -> str:
+    """Insert an unreferenced group into ``model_groups``, not onto the end of the document.
+
+    ``_VALID_YAML`` ends with its ``workloads`` mapping, so appending a model-group block would
+    land it under ``workloads`` and fail schema validation long before the reachability rule these
+    tests are about.
+    """
+    head, separator, tail = _VALID_YAML.partition("workloads:")
+    orphan = _ORPHAN_GROUP.format(staged="    staged: true\n" if staged else "")
+    return head + orphan + separator + tail
+
 _VALID_YAML = """
 schema_version: "1.0"
 policy_id: "test-policy"
@@ -208,9 +220,11 @@ def test_load_routing_policy_fails_closed_on_a_duplicate_top_level_key(tmp_path:
 
     with pytest.raises(RoutingPolicyLoadError):
         load_routing_policy(policy_path)
+
+
 def test_loader_rejects_a_model_group_no_workload_can_select(tmp_path: Path) -> None:
     policy = tmp_path / "policy.yaml"
-    policy.write_text(_VALID_YAML + _ORPHAN_GROUP.format(staged=""), encoding="utf-8")
+    policy.write_text(_policy_with_orphan_group(staged=False), encoding="utf-8")
 
     with pytest.raises(RoutingPolicyLoadError, match="unreachable entries"):
         load_routing_policy(policy)
@@ -225,9 +239,7 @@ def test_loader_accepts_an_unreferenced_group_that_declares_itself_staged(
     to be deliberate and visible in the policy itself rather than a loader flag or an env var.
     """
     policy = tmp_path / "policy.yaml"
-    policy.write_text(
-        _VALID_YAML + _ORPHAN_GROUP.format(staged="    staged: true\n"), encoding="utf-8"
-    )
+    policy.write_text(_policy_with_orphan_group(staged=True), encoding="utf-8")
 
     loaded = load_routing_policy(policy)
 
