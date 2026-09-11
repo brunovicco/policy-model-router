@@ -9,6 +9,80 @@ of this service. `0.2.0` is the first version that reflects what the service act
 
 ## Unreleased
 
+## [0.5.0] - 2026-09-11
+
+This release turns the service from a deterministic router into a runtime policy enforcement
+point. Everything below is opt-in and off by default; `staging` and `production` refuse to start
+without it.
+
+### Added
+
+- Signed Governance runtime authorization on `POST /route` (ADR-0012). The governed request body
+  wraps the existing `ModelRouteRequest` alongside an Ed25519-signed authorization envelope, and is
+  verified in a fixed order: issuer and audience, validity window, exact trusted `kid` and its
+  lifecycle, signature over canonical protected header plus claims, request binding, agent binding,
+  and Governance policy provenance. The authorization is single-use: its identifier is consumed
+  atomically, through Redis where configured, so a replay is denied. After routing, the selected
+  model group must itself appear in the signed scope and be signed for the request's data
+  classification. Configured through `RUNTIME_AUTHORIZATION_*`.
+- Structured runtime violation evidence (ADR-0013). Every runtime authorization denial returns a
+  versioned, content-minimized `violation` envelope alongside the stable error object, carrying a
+  bounded category and reason code, structural identifiers, and a SHA-256 digest over canonical
+  JSON for tamper detection. Authorization trust is reported coarsely as `absent`, `present`, or
+  `verified`, so a signature that verified before a later binding failure is never overstated as
+  trusted. Prompts, outputs, documents, headers, credentials and exception messages are excluded by
+  construction.
+- Runtime kill-switch and revocation-floor enforcement (ADR-0014). The Router reads a
+  Governance-owned, read-only Redis projection keyed by the signed `agent_id` and denies when the
+  kill switch is engaged, when the signed agent version is at or below the revocation floor, or
+  when the projection is missing or unreachable - absence of state is a denial, not a default
+  allow. Checked after the authorization proves valid but *before* the single-use identifier is
+  consumed, so a valid pre-kill authorization reports the real reason instead of being irreversibly
+  spent. Configured through `RUNTIME_CONTROL_*`.
+- W3C trace context continuation at the routing boundary (ADR-0013, tracing), via
+  `a2a-otel-kit`. Incoming `traceparent`/`tracestate` are extracted into a SERVER span with
+  content-free attributes, alongside the existing bounded `X-Correlation-Id`. The trace context is
+  observability metadata only: it never participates in authorization, replay detection, policy
+  evaluation, model selection, or violation integrity.
+- `policy_model_router_runtime_authorization_total` and
+  `policy_model_router_runtime_violations_total` on `GET /metrics`, both with bounded labels.
+
+### Changed
+
+- Workload and logical model-group names are validated policy-defined identifiers rather than
+  closed Python enums (ADR-0015). They are 1-128 lowercase characters from `a-z0-9._-`, beginning
+  and ending alphanumeric, and are recognized only once the active routing policy declares them.
+  New workload identifiers must be namespace-qualified (`rag.answer`); the five credit-desk names
+  remain valid unqualified through the 0.x compatibility window. A syntactically valid workload the
+  policy does not declare is no longer rejected by the transport schema - it reaches the policy
+  boundary and fails closed there. `Workload` and `ModelGroup` remain importable as aliases of
+  `WorkloadId` and `ModelGroupId`. See `docs/MIGRATION_TO_GENERIC_POLICY.md`.
+- The routing policy loader rejects model groups that no workload can select, in addition to
+  workloads referencing undeclared groups.
+- Both READMEs now document the runtime enforcement boundary, its settings, the `403` violation
+  envelope, and this service's role as the Policy Decision Point for `governed-llm-gateway`, whose
+  enforcement point may only narrow what this router authorizes. `docs/ARCHITECTURE.md` lists the
+  modules its layer tree had omitted and tracks two previously unrecorded gaps.
+
+### Fixed
+
+- The `workload` label on the three route metrics is bounded to the vocabulary the active policy
+  declares; every undeclared workload is reported as `undeclared`. Since ADR-0015 made workloads
+  caller-supplied identifiers, the previous behavior let any authenticated caller create unbounded
+  Prometheus child metrics that are never reclaimed - and the `finally` block recorded them even
+  for a workload that failed closed. Structured logs keep the verbatim value, and the previously
+  silent undeclared-workload path now emits a `routing_decision` log line.
+
+### Known gaps
+
+- The runtime enforcement modules sit at the package root, outside the layer structure, and
+  `scripts/validate_architecture.py` does not inspect files outside a layer - so the gate reports
+  success without checking them. Two of them import `entrypoints.contracts`, inverting the
+  dependency rule. Tracked in `docs/ARCHITECTURE.md`.
+- `governed-llm-gateway` does not yet produce signed runtime authorization, so a Router deployment
+  with `RUNTIME_AUTHORIZATION_REQUIRED=true` returns `403` to it and the gateway fails closed before
+  any provider call. That integration is pending on the Governance side.
+
 ## [0.4.0] - 2026-07-23
 
 ### Changed
