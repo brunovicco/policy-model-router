@@ -118,7 +118,9 @@ and selects the mapped group only if it survived. Every other group is reported 
 for the constraint it failed or because the workload maps elsewhere.
 
 Evaluating the groups that cannot be selected is deliberate: it is what makes the decision
-explainable. It is audit cost, not routing cost.
+explainable. It is audit cost, not routing cost — and a caller that will not persist the
+explanation can decline it with `"include_rejected_candidates": false`, paying for one candidate
+instead of the whole catalog without changing the decision.
 
 Order matters, because the first constraint a candidate fails becomes its rejection reason.
 
@@ -215,6 +217,7 @@ timezone-aware UTC, and numeric limits must be positive.
 | `structured_output_required` | Boolean |
 | `max_latency_ms` | Positive integer |
 | `max_cost_usd` | Positive decimal |
+| `include_rejected_candidates` | Boolean, default `true`. Set `false` to evaluate only the mapped group: same selection, same accept/reject outcome, `rejected_candidates` returned empty rather than omitted |
 
 Both token estimates feed the cost constraint: a group is priced per token, input and output
 separately, so estimated cost is a function of the call's actual size ([ADR-0010](docs/adr/0010-token-based-cost-estimation.md)).

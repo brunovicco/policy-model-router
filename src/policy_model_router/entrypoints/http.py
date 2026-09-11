@@ -815,7 +815,10 @@ async def route(
     )
     started_at = time.monotonic()
     try:
-        decision = await use_case.route(domain_request)
+        decision = await use_case.route(
+            domain_request,
+            include_rejected_candidates=route_request.include_rejected_candidates,
+        )
     except NoViableModelGroupError as exc:
         ROUTE_REJECTIONS_TOTAL.labels(
             workload=workload_label,

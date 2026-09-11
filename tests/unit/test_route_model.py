@@ -302,6 +302,95 @@ async def test_route_rejects_the_mapped_group_when_risk_level_is_not_authorized(
     assert "critical" in excinfo.value.decision.reason
 
 
+class _RecordsResolvedGroups:
+    """Availability provider stub that records which groups it was asked about."""
+
+    def __init__(self) -> None:
+        self.asked: list[frozenset[ModelGroup]] = []
+
+    async def resolve(self, declared: Mapping[ModelGroup, bool]) -> Mapping[ModelGroup, bool]:
+        """Record the requested set and pass the declared flags through."""
+        self.asked.append(frozenset(declared))
+        return declared
+
+
+@pytest.mark.anyio
+async def test_opting_out_of_rejected_candidates_keeps_the_same_selection(
+    reference_policy: RoutingPolicy, make_request: MakeRequest
+) -> None:
+    use_case = RouteModelUseCase(
+        reference_policy,
+        clock=_FixedClock(),
+        id_generator=_FixedIdGenerator(),
+        availability=StaticAvailabilityProvider(),
+        service_version=_TEST_SERVICE_VERSION,
+        environment=_TEST_ENVIRONMENT,
+    )
+    request = make_request(workload=Workload.CASHFLOW_ANALYSIS, max_latency_ms=60_000)
+
+    explained = await use_case.route(request)
+    bare = await use_case.route(request, include_rejected_candidates=False)
+
+    assert bare.selected_model_group == explained.selected_model_group
+    assert bare.reason == explained.reason
+    assert bare.policy_digest == explained.policy_digest
+    assert explained.rejected_candidates != ()
+    assert bare.rejected_candidates == ()
+
+
+@pytest.mark.anyio
+async def test_opting_out_evaluates_only_the_mapped_group(
+    reference_policy: RoutingPolicy, make_request: MakeRequest
+) -> None:
+    """The saving is the point: one candidate resolved instead of the whole catalog.
+
+    Explaining the groups that cannot be selected is what costs the extra work, so a caller that
+    will not persist the explanation should not pay for it - most visibly once the availability
+    port reaches a provider instead of returning a static flag.
+    """
+    availability = _RecordsResolvedGroups()
+    use_case = RouteModelUseCase(
+        reference_policy,
+        clock=_FixedClock(),
+        id_generator=_FixedIdGenerator(),
+        availability=availability,
+        service_version=_TEST_SERVICE_VERSION,
+        environment=_TEST_ENVIRONMENT,
+    )
+    request = make_request(workload=Workload.CASHFLOW_ANALYSIS, max_latency_ms=60_000)
+
+    await use_case.route(request)
+    await use_case.route(request, include_rejected_candidates=False)
+
+    assert availability.asked[0] == frozenset(reference_policy.model_groups)
+    assert availability.asked[1] == frozenset({ModelGroup.REASONING_MEDIUM})
+
+
+@pytest.mark.anyio
+async def test_opting_out_still_rejects_a_request_the_mapped_group_cannot_serve(
+    reference_policy: RoutingPolicy, make_request: MakeRequest
+) -> None:
+    """Skipping the explanation must never skip the decision."""
+    use_case = RouteModelUseCase(
+        reference_policy,
+        clock=_FixedClock(),
+        id_generator=_FixedIdGenerator(),
+        availability=StaticAvailabilityProvider(),
+        service_version=_TEST_SERVICE_VERSION,
+        environment=_TEST_ENVIRONMENT,
+    )
+    request = make_request(
+        workload=Workload.DOCUMENT_EXTRACTION,
+        data_classification=DataClassification.CONFIDENTIAL,
+    )
+
+    with pytest.raises(NoViableModelGroupError) as excinfo:
+        await use_case.route(request, include_rejected_candidates=False)
+
+    assert excinfo.value.decision.rejected_model_group == ModelGroup.FAST_SMALL
+    assert excinfo.value.decision.reason_code is ReasonCode.DATA_CLASSIFICATION_NOT_AUTHORIZED
+
+
 class _AlwaysUnavailable:
     """Availability provider stub that overrides every group to unavailable."""
 
