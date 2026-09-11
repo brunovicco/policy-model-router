@@ -2,17 +2,20 @@
 
 [![Quality](https://github.com/brunovicco/policy-model-router/actions/workflows/quality.yml/badge.svg)](https://github.com/brunovicco/policy-model-router/actions/workflows/quality.yml)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Container image](https://img.shields.io/badge/ghcr.io-policy--model--router-2496ED?logo=docker&logoColor=white)](https://github.com/brunovicco/policy-model-router/pkgs/container/policy-model-router)
 
 Read this in [Português](README.pt-BR.md).
 
-A deterministic, fail-closed routing service that selects an approved model group for an LLM
+A fail-closed runtime policy enforcement service that selects an approved model group for an LLM
 workload before inference.
 
-The router keeps model choice out of agent prompts and
-application code. A caller describes the
-workload, data classification, context size, and operational limits; `POST /route` evaluates that
-request against a versioned policy and returns either an explainable decision record or an
-explicit rejection. It does not call an LLM.
+The router keeps model choice and runtime authorization outside agent prompts and application code.
+A caller describes the workload, data classification, context size, and operational limits;
+`POST /route` evaluates that request against a versioned policy and returns either an explainable
+decision record or an explicit rejection. Governed deployments can additionally require signed
+runtime authorization and consume runtime-control state such as a kill switch before a request is
+allowed to proceed. It does not call an LLM.
 
 ## Why this exists
 
@@ -33,6 +36,29 @@ Policy Model Router centralizes that boundary:
 The selected value is a logical model group such as `reasoning-medium`, not a provider or a
 deployment. Provider selection, failover, credentials, and the actual inference call belong to a
 downstream model gateway.
+
+### Where this sits: the router is the PDP
+
+This service is the **Policy Decision Point**. The companion
+[governed-llm-gateway](https://github.com/brunovicco/governed-llm-gateway) is the **Policy
+Enforcement Point**: it takes the decision produced here, intersects it with its own deployment
+registry, and executes the provider call. The binding between the two is versioned against
+`POST /route` wire schema `1.0` and documented on the gateway side in
+[`docs/architecture/PDP_PEP_CONTRACT_DRAFT.md`](https://github.com/brunovicco/governed-llm-gateway/blob/main/docs/architecture/PDP_PEP_CONTRACT_DRAFT.md).
+
+The invariant across the pair is one-directional:
+
+```text
+Gateway allowed set  ⊆  Policy Router authorized set
+```
+
+The gateway may reject more deployments than this router authorized. It may never broaden or
+synthesize authorization. That is why a rejection here carries the same provenance as an
+acceptance: the enforcement point has to be able to prove *which* policy denied a call, not just
+that something did.
+
+Either service runs without the other - this router has no dependency on the gateway, and its
+decisions are meaningful to any consumer that honors the same invariant.
 
 ## How routing works
 
@@ -194,7 +220,7 @@ Example response:
   "policy_id": "credit-desk-routing",
   "policy_version": "1.0.0",
   "policy_digest": "sha256:2f1a...c9",
-  "service_version": "0.3.0",
+  "service_version": "0.5.0",
   "environment": "production"
 }
 ```
@@ -239,7 +265,7 @@ shipped policy. The router does not silently promote the request to a stronger g
     "policy_id": "credit-desk-routing",
     "policy_version": "1.0.0",
     "policy_digest": "sha256:2f1a...c9",
-    "service_version": "0.3.0",
+    "service_version": "0.5.0",
     "environment": "production"
   }
 }
@@ -261,7 +287,7 @@ timestamps must be timezone-aware UTC values, and numeric limits must be positiv
 | `schema_version` | Exactly `1.0` |
 | `requested_at` | UTC timestamp |
 | `workflow_id`, `task_id`, `agent_name` | Non-empty strings, at most 200 characters |
-| `workload` | `document_extraction`, `cashflow_analysis`, `findings_correlation`, `opinion_drafting`, or `json_repair` |
+| `workload` | Any policy-defined identifier: 1-128 lowercase characters from `a-z0-9._-`, starting and ending alphanumeric. New workloads must be namespace-qualified (`rag.answer`); the five 0.x credit-desk names remain valid unqualified. A syntactically valid workload the active policy does not declare is **not** rejected by the schema - it reaches the policy boundary and fails closed there (see [ADR-0015](docs/adr/0015-policy-defined-workload-and-model-group-identifiers.md) and [the migration guide](docs/MIGRATION_TO_GENERIC_POLICY.md)) |
 | `risk_level` | `low`, `medium`, `high`, or `critical` |
 | `data_classification` | `public`, `internal`, `confidential`, or `restricted` |
 | `context_tokens_estimated` | Integer between zero and 10,000,000 (input/prompt tokens) |
@@ -285,7 +311,8 @@ Stable error codes are:
 | 422 | `invalid_request` | The request does not match the contract |
 | 422 | `no_viable_model_group` | The workload's mapped group failed a hard constraint |
 | 429 | `rate_limit_exceeded` | Too many requests for this `(client IP, agent_name)` pair |
-| 500 | `misconfigured_routing_policy` | A runtime policy has no mapping for a recognized workload |
+| 403 | *(a bounded runtime denial code)* | Signed runtime authorization or runtime control rejected the request; the body also carries a `violation` envelope (see [Runtime authorization](#runtime-authorization-and-governance-controls)) |
+| 500 | `misconfigured_routing_policy` | The active policy declares no rule for the requested workload |
 
 A missing, malformed, unknown-field, or incomplete YAML policy prevents the service from starting.
 
@@ -357,6 +384,124 @@ trust forwarded headers from an unrestricted set of peers, or any client could f
 multiply its quota. See [ADR-0008's second amendment](docs/adr/0008-redis-shared-rate-limiter.md)
 for the full rationale.
 
+## Runtime authorization and governance controls
+
+Everything above is the router's own policy boundary. A governed deployment can additionally
+require that each request arrive inside a **signed runtime scope** issued by an external Governance
+authority, and that an emergency stop be honored before any decision is made. Both are **off by
+default** and **mandatory in `staging`/`production`** - `APP_ENV` in those values with
+`RUNTIME_AUTHORIZATION_REQUIRED=false` refuses to start.
+
+When enforcement is on, `POST /route` takes a wrapped body instead of the bare request:
+
+```json
+{
+  "request": { "schema_version": "1.0", "workload": "cashflow_analysis", "...": "..." },
+  "authorization": {
+    "protected": { "typ": "application/vnd.verifiable-ai-governance.runtime-authorization+json",
+                   "alg": "Ed25519", "kid": "governance-key-2026a" },
+    "claims": { "authorization_id": "...", "issuer": "...", "audience": ["policy-model-router"],
+                "issued_at": "...", "not_before": "...", "expires_at": "...",
+                "subject": { "agent_id": "...", "agent_version": 3, "...": "..." },
+                "request": { "workflow_id": "...", "task_id": "...", "workload": "...",
+                             "max_cost_usd_micros": 1000000, "...": "..." },
+                "scope": { "risk_tier": "high", "data_classification": "restricted",
+                           "autonomy_level": "a2_prepare_for_approval",
+                           "models": [{ "routing_group": "reasoning-strong",
+                                        "allowed_data_classes": ["restricted"], "...": "..." }],
+                           "kill_switch_enabled": true, "...": "..." },
+                "scope_digest": "<sha256 hex>",
+                "policy": { "policy_id": "...", "policy_digest": "<sha256 hex>", "...": "..." } },
+    "signature": "<unpadded base64url of 64 Ed25519 bytes>"
+  }
+}
+```
+
+The envelope is verified before routing and re-checked after it. In order:
+
+1. **Identity and time** - issuer, audience, `issued_at`/`not_before`/`expires_at`, bounded to a
+   ten-minute maximum lifetime.
+2. **Key** - resolved by exact `kid` against a public-only trusted key set, with no fallback;
+   revoked keys and closed verification windows are rejected.
+3. **Signature** - Ed25519 over canonical JSON of `{protected, claims}`, so the signing bytes stay
+   byte-for-byte compatible with the issuing repository.
+4. **Request binding** - eleven request facts must match the signed claims, so an authorization
+   cannot be replayed against a different, cheaper, or lower-risk request.
+5. **Agent binding** - the calling `agent_name` must map to the signed Governance `agent_id`.
+6. **Policy provenance** - the signed policy and control-catalog IDs, versions, and digests must be
+   the ones this deployment trusts.
+7. **Runtime control** - the kill switch and the revocation floor, read from a Governance
+   projection (see below).
+8. **Single use** - the `authorization_id` is atomically consumed; a replay is denied.
+9. **Selected model** - *after* routing, the group this router selected must itself appear in the
+   signed scope and be signed for the request's data classification.
+
+Every step fails closed with a bounded, machine-readable code, and a denial returns `403` carrying
+a content-minimized `violation` envelope - a digest-bound event with the category, the code, the
+authorization state, and structural identifiers only. It never copies prompts, headers, credentials,
+or request content.
+
+```json
+{
+  "error": { "code": "selected_model_group_not_authorized",
+             "message": "runtime authorization denied" },
+  "violation": {
+    "event": { "schema_version": "1.0", "event_id": "...", "occurred_at": "...",
+               "source_service": "policy-model-router", "enforcement_action": "blocked",
+               "category": "model_scope", "code": "selected_model_group_not_authorized",
+               "correlation_id": "...", "authorization": { "state": "verified", "...": "..." },
+               "request": { "workflow_id": "...", "task_id": "...", "agent_name": "...",
+                            "workload": "..." },
+               "selected_model_group": "reasoning-strong" },
+    "event_digest": "<sha256 hex>"
+  }
+}
+```
+
+Violation categories are `authorization`, `replay`, `request_binding`, `governance_provenance`, and
+`model_scope`. The denial codes are listed in
+[`docs/runtime-authorization-operations.md`](docs/runtime-authorization-operations.md).
+
+### Runtime control: kill switch and revocation floor
+
+`RUNTIME_CONTROL_REQUIRED=true` makes the router read a Governance-owned, read-only Redis
+projection before consuming the authorization. It denies when the snapshot says the kill switch is
+engaged, when the signed agent version is at or below the revocation floor, or when the projection
+is missing or unreachable - the absence of state is a denial, not a default-allow. Runtime control
+requires signed runtime authorization; enabling it alone is a startup error. See
+[`docs/runtime-kill-switch-enforcement.md`](docs/runtime-kill-switch-enforcement.md) and its
+[threat model](docs/runtime-kill-switch-threat-model.md).
+
+### Settings
+
+All of these are optional while enforcement is off. Operational values and a rollout order are in
+[`docs/runtime-authorization-operations.md`](docs/runtime-authorization-operations.md).
+
+| Environment variable | Default | Purpose |
+|---|---|---|
+| `RUNTIME_AUTHORIZATION_REQUIRED` | `false` | Master switch. Must be `true` in `staging`/`production` |
+| `RUNTIME_AUTHORIZATION_ISSUER` | `verifiable-ai-governance:production` | Trusted signer identity |
+| `RUNTIME_AUTHORIZATION_AUDIENCE` | `policy-model-router` | This service's audience value |
+| `RUNTIME_AUTHORIZATION_TRUSTED_KEY_SET_PATH` | *(unset)* | Public-only Ed25519 key set; required when enforcement is on |
+| `RUNTIME_AUTHORIZATION_AGENT_BINDINGS_JSON` | `{}` | JSON object mapping `agent_name` to its Governance agent UUID |
+| `RUNTIME_AUTHORIZATION_EXPECTED_POLICY_ID` | `baseline-governance-policy` | Governance policy identity this deployment trusts |
+| `RUNTIME_AUTHORIZATION_EXPECTED_POLICY_VERSION` | `1.0.0` | Trusted Governance policy version |
+| `RUNTIME_AUTHORIZATION_EXPECTED_POLICY_DIGEST` | *(unset)* | Lowercase SHA-256; required when enforcement is on |
+| `RUNTIME_AUTHORIZATION_EXPECTED_CONTROL_CATALOG_ID` | `verifiable-ai-governance-baseline` | Trusted control catalog identity |
+| `RUNTIME_AUTHORIZATION_EXPECTED_CONTROL_CATALOG_VERSION` | `1.0.0` | Trusted control catalog version |
+| `RUNTIME_AUTHORIZATION_EXPECTED_CONTROL_CATALOG_DIGEST` | *(unset)* | Lowercase SHA-256; required when enforcement is on |
+| `RUNTIME_AUTHORIZATION_CLOCK_SKEW_SECONDS` | `0` | Allowed skew, `0`-`60` |
+| `RUNTIME_AUTHORIZATION_MAX_KEY_SET_BYTES` | `262144` | Bound on the key-set file |
+| `RUNTIME_AUTHORIZATION_REPLAY_KEY_PREFIX` | `policy-model-router:runtime-auth:` | Redis namespace for replay consumption |
+| `RUNTIME_AUTHORIZATION_REPLAY_MAX_ENTRIES` | `10000` | In-memory replay guard bound (local/test only; `REDIS_URL` is required in `staging`/`production`) |
+| `RUNTIME_CONTROL_REQUIRED` | `false` | Enforce the kill switch and revocation floor. Must be `true` in `staging`/`production` |
+| `RUNTIME_CONTROL_REDIS_KEY_PREFIX` | `verifiable-ai-governance:runtime-control:v1:agent:` | Namespace shared with Governance |
+| `RUNTIME_CONTROL_MAX_SNAPSHOT_BYTES` | `4096` | Bound on one projection snapshot |
+| `RUNTIME_CONTROL_TIMEOUT_SECONDS` | `2.0` | Redis connect/read timeout for the projection |
+
+Distributed tracing across this boundary continues the caller's W3C trace context; see
+[`docs/runtime-tracing.md`](docs/runtime-tracing.md).
+
 ## Availability
 
 `ModelGroupProfile.available` in `config/routing_policy.yaml` is a static, hand-edited flag. The
@@ -380,10 +525,17 @@ routing use case or the domain constraints.
 | `policy_model_router_route_duration_seconds` | Histogram | `workload` | Time spent evaluating one routing decision |
 | `policy_model_router_rate_limit_decisions_total` | Counter | `tier` (`per_ip`, `per_agent`), `outcome` (`allowed`, `blocked`) | Rate limiter admit/block decisions |
 | `policy_model_router_rate_limiter_backend_unavailable_total` | Counter | - | Requests where the Redis-backed rate limiter failed open because Redis was unreachable |
+| `policy_model_router_runtime_authorization_total` | Counter | `outcome` (`verified`, `denied`, `legacy_dev`) | Signed runtime authorization checks |
+| `policy_model_router_runtime_violations_total` | Counter | `category`, `code` | Fail-closed runtime violations, by bounded category and reason code |
 
 Alert on `increase(policy_model_router_rate_limiter_backend_unavailable_total[5m]) > 0` (summed
 across replicas) to catch a sustained Redis outage instead of relying on the
 `rate_limiter_backend_unavailable` log line alone.
+
+The `workload` label carries the requested workload only when the active policy declares it. Since
+workloads became caller-supplied identifiers (ADR-0015), any other value would be unbounded
+cardinality, so every undeclared workload is reported as `workload="undeclared"`. The structured
+logs still carry the verbatim value for debugging.
 
 Every `POST /route` call also emits a structured `routing_decision` log line (`outcome=accepted` or
 `outcome=rejected`) carrying `routing_decision_id`, `correlation_id`, `workload`, the relevant
@@ -431,13 +583,19 @@ adapters    -> application/domain
 domain      -> no outer layer
 ```
 
-- `domain`: closed vocabularies, policy value objects, routing requests and decisions, and pure
+- `domain`: controlled vocabularies (data classification, risk level, reason codes), validated
+  policy-defined identifiers, policy value objects, routing requests and decisions, and pure
   constraint predicates;
 - `application`: deterministic routing use case and clock/ID/availability ports;
 - `adapters`: YAML policy loader, system clock, UUID generator, static availability provider, and
   an in-memory rate limiter (default) plus an optional Redis-backed rate limiter;
-- `entrypoints`: Pydantic wire contracts, FastAPI endpoints (`/route`, `/health`, `/readyz`), error
-  mapping, and structured logging.
+- `entrypoints`: Pydantic wire contracts, FastAPI endpoints (`/route`, `/health`, `/readyz`,
+  `/metrics`), settings, error mapping, and structured logging.
+
+The runtime enforcement modules - the signed-authorization contract and verifier, the runtime
+control reader, and the violation-evidence builder - currently sit at the package root rather than
+inside a layer, and are not yet covered by the architecture gate. That is tracked as a known gap in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#known-gaps), not a settled placement.
 
 The policy is loaded once at startup, and request handling is stateless. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the dependency rules and diagrams, and the
@@ -447,8 +605,16 @@ The policy is loaded once at startup, and request handling is stateless. See
 ([ADR-0006](docs/adr/0006-availability-provider-port.md)), the HTTP boundary hardening
 ([ADR-0007](docs/adr/0007-http-boundary-hardening.md)), the optional shared rate limiter
 ([ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md)), decision provenance
-([ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md)), and token-based cost
-estimation ([ADR-0010](docs/adr/0010-token-based-cost-estimation.md)) look the way they do.
+([ADR-0009](docs/adr/0009-policy-identity-and-decision-provenance.md)), token-based cost
+estimation ([ADR-0010](docs/adr/0010-token-based-cost-estimation.md)), the pre-parse HTTP limits
+([ADR-0011](docs/adr/0011-http-boundary-pre-parse-limits.md)), signed runtime authorization
+([ADR-0012](docs/adr/0012-signed-runtime-authorization.md)), structured violation evidence
+([ADR-0013](docs/adr/0013-structured-runtime-violation-evidence.md)), W3C trace continuation
+([ADR-0013, tracing](docs/adr/0013-w3c-runtime-trace-context.md)), kill-switch enforcement
+([ADR-0014](docs/adr/0014-runtime-kill-switch-enforcement.md)), and policy-defined workload and
+model-group identifiers
+([ADR-0015](docs/adr/0015-policy-defined-workload-and-model-group-identifiers.md)) look the way
+they do.
 
 ## Current scope
 
@@ -462,7 +628,12 @@ The MVP intentionally does not:
 - fall back when the workload's mapped group is rejected;
 - provide full IAM: per-agent `API_KEYS` authenticate a claimed `agent_name` but have no expiry,
   scoping, or identity assurance beyond "knew the right key" (see
-  [Authentication and rate limiting](#authentication-and-rate-limiting));
+  [Authentication and rate limiting](#authentication-and-rate-limiting)). Signed runtime
+  authorization is the stronger boundary and is available today, but it authenticates the
+  *Governance scope of a request*, not the transport caller - it does not replace mTLS or OAuth2
+  client credentials at the edge;
+- reload the routing policy without a restart: it is read once at startup, so changing a mapping
+  or marking a group unavailable is a redeploy;
 - share rate-limit state across replicas *by default*; that requires opting into `REDIS_URL`, which
   in turn adds Redis as a real infrastructure dependency with its own availability to manage.
 

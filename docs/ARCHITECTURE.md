@@ -35,7 +35,8 @@ external monorepo does not have yet) with no automated compatibility check - see
 ```text
 src/policy_model_router/
 ├── domain/
-│   ├── enums.py         # DataClassification, RiskLevel, Workload, ModelGroup (closed vocabularies)
+│   ├── enums.py         # DataClassification, RiskLevel, ReasonCode (controlled vocabularies)
+│   ├── identifiers.py   # WorkloadId, ModelGroupId: validated policy-defined identifiers (ADR-0015)
 │   ├── catalog.py       # ModelGroupProfile, WorkloadRule, RoutingPolicy (declarative policy shape)
 │   ├── routing.py       # RouteRequest, RouteDecision, RejectedCandidate, NoViableModelGroupError
 │   └── constraints.py   # Ordered, pure eliminatory predicates (see ADR-0005)
@@ -49,16 +50,33 @@ src/policy_model_router/
 │   ├── availability.py           # StaticAvailabilityProvider (no live health check; ADR-0006)
 │   ├── rate_limiter.py           # InMemoryRateLimiter, default per-process limiter (ADR-0007)
 │   └── redis_rate_limiter.py     # RedisRateLimiter, optional cross-replica limiter (ADR-0008)
-└── entrypoints/
-    ├── contracts.py     # Pydantic wire contracts + domain <-> wire mapping
-    ├── http.py           # FastAPI app: POST /route (auth+rate limit), /health, /readyz, /metrics
-    └── logging.py        # configure_logging(), called once at process startup
+├── entrypoints/
+│   ├── contracts.py     # Pydantic wire contracts + domain <-> wire mapping
+│   ├── http.py          # FastAPI app: POST /route (auth+rate limit), /health, /readyz, /metrics
+│   ├── settings.py      # Typed, validated environment configuration
+│   ├── runtime_authorization_settings.py   # RUNTIME_AUTHORIZATION_* trust settings (ADR-0012)
+│   ├── runtime_control_settings.py         # RUNTIME_CONTROL_* projection settings (ADR-0014)
+│   ├── runtime_authorization_factory.py    # Composes the verifier, replay guard, control reader
+│   └── logging.py       # configure_logging(); see Known gaps - the lifespan configures
+│                        # observability through a2a-otel-kit instead, so this is not on the
+│                        # production path today
+│
+│   # Runtime enforcement, currently at the package root rather than inside a layer.
+│   # See Known gaps: the architecture gate does not inspect these files.
+├── runtime_authorization_contract.py  # Signed Governance envelope mirror (canonical signing bytes)
+├── runtime_authorization.py           # Verifier: signature, bindings, provenance, replay (ADR-0012)
+├── runtime_control.py                 # Kill switch + revocation floor projection (ADR-0014)
+├── runtime_violation_contract.py      # Violation event/envelope schema (ADR-0013)
+└── runtime_violation.py               # Content-minimized violation evidence builder (ADR-0013)
 ```
 
 ### Domain
 
-Closed vocabularies (`enums.py`), immutable policy and request/decision Value Objects
-(`catalog.py`, `routing.py`), and the ordered eliminatory constraint predicates (`constraints.py`).
+Controlled vocabularies (`enums.py`) for data classification, risk level and reason codes;
+validated policy-defined identifiers (`identifiers.py`) for workloads and logical model groups,
+which ADR-0015 deliberately left open rather than closing into enums; immutable policy and
+request/decision Value Objects (`catalog.py`, `routing.py`); and the ordered eliminatory constraint
+predicates (`constraints.py`).
 No framework, transport, or persistence types. See ADR-0005 for the routing algorithm this layer
 implements.
 
@@ -187,6 +205,8 @@ should not be assumed fixed:
 | `/metrics` (and `/health`/`/readyz`) have no network-level restriction configured in this repo | Unauthenticated and unthrottled by design (ADR-0007), matching common health/scrape-probe practice; no ingress/mesh boundary is defined in `Dockerfile`/`docker-compose.yml` | Anyone who can reach the port can read metrics (minor recon: process/GC stats, `/route` outcome counts). Operators must restrict this at the ingress/mesh layer themselves - same as the existing "deploy `/route` behind an authenticated gateway" requirement |
 | Rate-limit key trusts only the raw TCP peer address | `entrypoints/http.py` never reads `X-Forwarded-For`/`Forwarded`; no `ProxyHeadersMiddleware`, no `--forwarded-allow-ips` | Behind a reverse proxy, every real client shares the proxy's IP as the key's IP component, collapsing per-client granularity to one bucket (for both rate-limit tiers). A deployment that later enables proxy-header trust *without* restricting it to the proxy's own address would let any client forge the header and multiply its quota - a known misconfiguration to avoid, not current behavior |
 | `credit_desk_contracts` mirror has no automated compatibility check | `entrypoints/contracts.py` originally mirrored `credit_desk_contracts.routing` field-for-field by hand; ADR-0009 and ADR-0010 added fields the external monorepo does not have yet, and there is still no shared package, published JSON Schema, or contract test between the two repos | The two contracts can drift silently; the external monorepo must be updated by hand to match, and nothing in this repo's CI would catch a future divergence |
+| Runtime enforcement modules sit outside the layer structure, and outside the architecture gate | `runtime_authorization*.py`, `runtime_control.py` and `runtime_violation*.py` live at the package root. `scripts/validate_architecture.py` derives a file's layer from its path and returns early for anything that is not under `domain/`, `application/`, `adapters/` or `entrypoints/`, so these files are never inspected. Two of them import `entrypoints.contracts`, inverting the dependency rule below | The most security-sensitive code in the repository is the code the gate does not check, and a signature-verification rule depends on a transport schema. The gate reports "passed" either way. Closing it means both making an out-of-layer file an explicit violation *and* relocating these modules so the verifier takes a domain `RouteRequest` rather than the Pydantic `ModelRouteRequest` |
+| `configure_logging()` is not on the production path | The FastAPI lifespan configures observability through `a2a-otel-kit`'s `Observability.configure()`. Nothing in production calls `entrypoints/logging.py::configure_logging`, though `.claude/rules/observability.md` still instructs contributors to, and five unit tests cover it | Contributors are pointed at a function the service does not use, and the tests for it inflate coverage without covering a live path. Needs a decision: remove it and rewrite the rule for the kit, or wire it in as the fallback it reads like |
 | Body-size cap only checks `Content-Length`, not actual streamed bytes | `_BodySizeAndIpRateLimitMiddleware` (ADR-0011) rejects a declared-oversized `Content-Length` before parsing, but does not wrap `receive()` to count bytes as they arrive | A chunked-transfer-encoding body with no `Content-Length` header bypasses the cap entirely. Accepted for this service's documented deployment model (behind an authenticated gateway, ADR-0004); closing it fully means wrapping `receive()` - real additional complexity not yet judged proportionate |
 
 **Resolved:** the API key was a single shared secret for the whole service; ADR-0007's 2026-07-22
