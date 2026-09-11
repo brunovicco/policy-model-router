@@ -312,9 +312,7 @@ def test_in_memory_replay_guard_fails_closed_at_capacity() -> None:
     guard = InMemoryRuntimeAuthorizationReplayGuard(max_entries=1)
     expires_at = NOW + timedelta(minutes=5)
     asyncio.run(
-        guard.consume(
-            UUID("11111111-2222-3333-4444-555555555555"), expires_at=expires_at, now=NOW
-        )
+        guard.consume(UUID("11111111-2222-3333-4444-555555555555"), expires_at=expires_at, now=NOW)
     )
 
     with pytest.raises(RuntimeAuthorizationError) as excinfo:
