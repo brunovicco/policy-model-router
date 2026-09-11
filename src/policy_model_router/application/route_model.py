@@ -11,7 +11,7 @@ from policy_model_router.application.ports import AvailabilityProvider, Clock, I
 from policy_model_router.domain.catalog import RoutingPolicy
 from policy_model_router.domain.constraints import CONSTRAINTS, ConstraintFailure
 from policy_model_router.domain.enums import ReasonCode
-from policy_model_router.domain.identifiers import ModelGroupId
+from policy_model_router.domain.identifiers import ModelGroupId, WorkloadId
 from policy_model_router.domain.routing import (
     NoViableModelGroupError,
     RejectedCandidate,
@@ -45,6 +45,16 @@ class RouteModelUseCase:
         self._availability = availability
         self._service_version = service_version
         self._environment = environment
+
+    def declares_workload(self, workload: WorkloadId) -> bool:
+        """Return whether the active policy defines a rule for ``workload``.
+
+        Exposed so a caller can tell a policy-defined workload from an arbitrary one *without*
+        reaching into the policy itself. Since ADR-0015 the wire accepts any syntactically valid
+        identifier, so an entrypoint that derives a bounded label or metric dimension from the
+        requested workload needs this distinction; the routing decision itself does not.
+        """
+        return workload in self._policy.workloads
 
     async def route(self, request: RouteRequest) -> RouteDecision:
         """Return the routing decision for one request, or fail closed if it is not authorized."""

@@ -618,6 +618,32 @@ def test_metrics_endpoint_requires_no_api_key(client: TestClient) -> None:
     assert "policy_model_router_rate_limiter_backend_unavailable_total" in response.text
 
 
+def test_metrics_never_gain_a_label_for_a_workload_the_policy_does_not_declare(
+    client: TestClient,
+) -> None:
+    """An undeclared workload must not create its own metric series.
+
+    Since ADR-0015 ``workload`` is a caller-supplied policy identifier rather than a closed enum,
+    so using it verbatim as a Prometheus label lets any authenticated caller mint unbounded child
+    metrics that are never reclaimed. Every workload the loaded policy does not declare has to
+    collapse onto one shared label instead.
+    """
+    undeclared = [f"audit.cardinality-probe-{index}" for index in range(5)]
+
+    for workload in undeclared:
+        response = client.post(
+            "/route", json=_valid_payload(workload=workload), headers=_AUTH_HEADERS
+        )
+        assert response.status_code == 500
+        assert response.json()["error"]["code"] == "misconfigured_routing_policy"
+
+    metrics = client.get("/metrics").text
+
+    for workload in undeclared:
+        assert workload not in metrics
+    assert 'workload="undeclared"' in metrics
+
+
 def test_metrics_endpoint_includes_route_metrics_after_a_request(client: TestClient) -> None:
     client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
 
