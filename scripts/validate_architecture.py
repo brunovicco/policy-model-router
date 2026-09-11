@@ -44,6 +44,9 @@ FORBIDDEN_EXTERNAL: dict[str, tuple[str, ...]] = {
     ),
 }
 DYNAMIC_IMPORTS = {"__import__", "importlib.import_module"}
+# A module directly under the package root carries no layer, so `layer_for` returns None and the
+# dependency rules below silently skip it. Only the package's own __init__ legitimately sits there.
+UNLAYERED_EXEMPT_FILENAMES = frozenset({"__init__.py"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,8 +188,56 @@ def validate_boundary_file(path: Path, root: Path, boundary: Boundary) -> list[V
     return sorted(violations, key=lambda item: (item.path.as_posix(), item.line, item.message))
 
 
-def load_config(root: Path) -> tuple[list[Path], bool, list[Boundary]]:
-    """Load source roots and boundaries from pyproject.toml."""
+def unlayered_modules(source_root: Path) -> list[Path]:
+    """Return package modules that sit outside every architecture layer."""
+    found: list[Path] = []
+    for path in sorted(source_root.rglob("*.py")):
+        relative = path.relative_to(source_root)
+        parts = relative.parts
+        if len(parts) < 2 or parts[1] in LAYERS:
+            continue
+        if len(parts) == 2 and parts[1] in UNLAYERED_EXEMPT_FILENAMES:
+            continue
+        found.append(relative)
+    return found
+
+
+def validate_layer_placement(source_root: Path, allowlist: frozenset[str]) -> list[Violation]:
+    """Require every package module to live inside a layer, and keep the allowlist honest.
+
+    Without this, an out-of-layer module is not merely unchecked - it is invisible: `layer_for`
+    returns None for it and `validate_file` returns immediately, so the dependency rules never run
+    and the gate still reports success. The allowlist records modules that predate the rule; it may
+    only shrink, so a stale entry is itself a violation and a module cannot quietly stay exempt
+    after it is moved.
+    """
+    violations: list[Violation] = []
+    layers = ", ".join(sorted(LAYERS))
+    present = {path.as_posix() for path in unlayered_modules(source_root)}
+    violations.extend(
+        Violation(
+            Path(module),
+            1,
+            f"module sits outside every architecture layer ({layers}), so no dependency "
+            "rule applies to it: move it into a layer, or record it in "
+            "tool.engineering-harness.architecture.unlayered-allowlist",
+        )
+        for module in sorted(present - allowlist)
+    )
+    violations.extend(
+        Violation(
+            Path(stale),
+            1,
+            "stale unlayered-allowlist entry: this module no longer sits outside a layer, "
+            "so remove it from tool.engineering-harness.architecture.unlayered-allowlist",
+        )
+        for stale in sorted(allowlist - present)
+    )
+    return violations
+
+
+def load_config(root: Path) -> tuple[list[Path], bool, list[Boundary], frozenset[str]]:
+    """Load source roots, boundaries, and the unlayered allowlist from pyproject.toml."""
     with (root / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)
     config: dict[str, Any] = (
@@ -218,14 +269,15 @@ def load_config(root: Path) -> tuple[list[Path], bool, list[Boundary]]:
                 deny_dynamic_imports=bool(item.get("deny-dynamic-imports", True)),
             )
         )
-    return source_roots, clean, boundaries
+    allowlist = frozenset(str(item) for item in config.get("unlayered-allowlist", []))
+    return source_roots, clean, boundaries, allowlist
 
 
 def main() -> int:
     """Validate configured source modules and return a process status."""
     root = Path(__file__).resolve().parents[1]
     try:
-        source_roots, clean, boundaries = load_config(root)
+        source_roots, clean, boundaries, unlayered_allowlist = load_config(root)
     except (OSError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
         print(f"Invalid architecture configuration: {exc}", file=sys.stderr)
         return 2
@@ -237,6 +289,7 @@ def main() -> int:
                 for path in sorted(source_root.rglob("*.py"))
                 for violation in validate_file(path, source_root)
             )
+            violations.extend(validate_layer_placement(source_root, unlayered_allowlist))
     for boundary in boundaries:
         if not boundary.path.is_dir():
             display_path = boundary.path.relative_to(root)
@@ -252,7 +305,10 @@ def main() -> int:
         )
     violations.sort(key=lambda item: (item.path.as_posix(), item.line, item.message))
     if not violations:
-        summary = f"{len(source_roots)} source roots, {len(boundaries)} boundaries"
+        summary = (
+            f"{len(source_roots)} source roots, {len(boundaries)} boundaries, "
+            f"{len(unlayered_allowlist)} unlayered modules allowlisted"
+        )
         print(f"Architecture dependency check passed ({summary}).")
         return 0
     print("Architecture dependency violations:", file=sys.stderr)
