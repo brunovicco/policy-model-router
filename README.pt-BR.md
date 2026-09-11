@@ -623,6 +623,14 @@ adicional) para compartilhar o rate limit entre réplicas - veja
 [Configuração da política](#configuração-da-política) e
 [Autenticação e rate limiting](#autenticação-e-rate-limiting).
 
+A imagem declara um `HEALTHCHECK` contra `/health` e respeita `TRUSTED_PROXY_IPS`: deixe sem valor
+(o padrão) e a chave de rate limit continua usando o endereço TCP real do par, sem confiar em
+nenhum cabeçalho encaminhado; defina com o endereço do próprio proxy para recuperar granularidade
+por cliente atrás de um ingress. Nunca use `*` - veja
+[Autenticação e rate limiting](#autenticação-e-rate-limiting) para entender por que confiar no
+cabeçalho vindo de um conjunto irrestrito de pares deixa qualquer cliente multiplicar a própria
+cota.
+
 Tags SemVer disparam o workflow de publicação do repositório, que constrói a imagem e envia suas
 tags versionadas para o GitHub Container Registry após o quality gate passar.
 
@@ -665,7 +673,7 @@ token ([ADR-0010](docs/adr/0010-token-based-cost-estimation.md)), os limites HTT
 ([ADR-0011](docs/adr/0011-http-boundary-pre-parse-limits.md)), a autorização de runtime assinada
 ([ADR-0012](docs/adr/0012-signed-runtime-authorization.md)), a evidência estruturada de violação
 ([ADR-0013](docs/adr/0013-structured-runtime-violation-evidence.md)), a continuidade de trace W3C
-([ADR-0013, tracing](docs/adr/0013-w3c-runtime-trace-context.md)), a aplicação da parada de
+([ADR-0016](docs/adr/0016-w3c-runtime-trace-context.md)), a aplicação da parada de
 emergência ([ADR-0014](docs/adr/0014-runtime-kill-switch-enforcement.md)) e os identificadores de
 carga de trabalho e grupo de modelo definidos por política
 ([ADR-0015](docs/adr/0015-policy-defined-workload-and-model-group-identifiers.md)) são como são.

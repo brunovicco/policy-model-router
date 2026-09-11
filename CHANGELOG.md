@@ -39,7 +39,7 @@ without it.
   allow. Checked after the authorization proves valid but *before* the single-use identifier is
   consumed, so a valid pre-kill authorization reports the real reason instead of being irreversibly
   spent. Configured through `RUNTIME_CONTROL_*`.
-- W3C trace context continuation at the routing boundary (ADR-0013, tracing), via
+- W3C trace context continuation at the routing boundary (ADR-0016), via
   `a2a-otel-kit`. Incoming `traceparent`/`tracestate` are extracted into a SERVER span with
   content-free attributes, alongside the existing bounded `X-Correlation-Id`. The trace context is
   observability metadata only: it never participates in authorization, replay detection, policy

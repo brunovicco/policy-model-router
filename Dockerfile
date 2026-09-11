@@ -38,4 +38,13 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 USER app
 
-CMD ["uvicorn", "policy_model_router.entrypoints.http:app", "--host", "0.0.0.0", "--port", "8000"]
+# /health is unauthenticated and unthrottled by design (ADR-0007), so an orchestrator can probe it
+# cheaply. Python rather than curl: the slim base ships neither curl nor wget.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"]
+
+# TRUSTED_PROXY_IPS is unset by default, so the rate-limit key keeps using the raw TCP peer address
+# and no forwarded header is trusted from anyone. Set it to the proxy's own address (never "*") to
+# recover per-client granularity behind an ingress - see the README's rate-limiting section for why
+# trusting the header from an unrestricted set of peers lets any client multiply its quota.
+CMD ["sh", "-c", "exec uvicorn policy_model_router.entrypoints.http:app --host 0.0.0.0 --port 8000 ${TRUSTED_PROXY_IPS:+--proxy-headers --forwarded-allow-ips \"$TRUSTED_PROXY_IPS\"}"]

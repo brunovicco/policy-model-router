@@ -275,6 +275,14 @@ def _api_docs_enabled() -> bool:
     Disabled by default (deny by default, per ``.claude/rules/security-privacy.md``): a minor
     recon surface (route shapes, field names) that orchestrators/scrapers never need, unlike
     ``/health``/``/readyz``/``/metrics``. Set ``ENABLE_API_DOCS=true`` for local development.
+
+    Read at import time, unlike every other setting, which the lifespan reads. That is not an
+    oversight but a FastAPI constraint: ``docs_url``/``redoc_url``/``openapi_url`` are consumed by
+    ``FastAPI.__init__``, which registers (or omits) the documentation routes there and then -
+    reassigning the attributes later moves nothing. The practical consequence is narrow, since a
+    served process has its environment set before the module is imported; it shows up only under a
+    harness that re-triggers the lifespan with a different environment, where this flag keeps the
+    value it had at import.
     """
     return Settings().enable_api_docs
 
@@ -479,7 +487,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await rate_limiter.ping()
         await ip_rate_limiter.ping()
     except Exception as exc:
-        raise RuntimeError(f"rate limiter backend is not reachable: {exc}") from exc
+        # Never interpolate the client's exception: some redis-py connection errors carry the
+        # configured URL, which can embed a password. The traceback still reaches stderr via
+        # `from exc`; the message that ends up in structured logs must not.
+        raise RuntimeError("rate limiter backend is not reachable") from exc
     app.state.rate_limiter = rate_limiter
     app.state.ip_rate_limiter = ip_rate_limiter
 
@@ -767,18 +778,20 @@ async def route(
 
     runtime_settings = http_request.app.state.runtime_authorization_settings
     verified_authorization = None
+    verifier: RuntimeAuthorizationVerifier | None = None
     if runtime_settings.required:
         if authorization is None:
             raise RuntimeAuthorizationError(
                 "runtime_authorization_required",
                 "Signed Governance runtime authorization is required",
             )
-        verifier = http_request.app.state.runtime_authorization_verifier
-        if not isinstance(verifier, RuntimeAuthorizationVerifier):
+        configured = http_request.app.state.runtime_authorization_verifier
+        if not isinstance(configured, RuntimeAuthorizationVerifier):
             raise RuntimeAuthorizationError(
                 "runtime_authorization_unavailable",
                 "Runtime authorization verifier is unavailable",
             )
+        verifier = configured
         verified_authorization = await verifier.verify(
             authorization,
             domain_request,
@@ -839,7 +852,7 @@ async def route(
             time.monotonic() - started_at,
         )
 
-    if verified_authorization is not None:
+    if verifier is not None and verified_authorization is not None:
         http_request.state.runtime_violation_selected_model_group = (
             decision.selected_model_group.value
         )
