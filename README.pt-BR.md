@@ -265,7 +265,9 @@ verificado em ordem fixa antes do roteamento e conferido de novo depois:
 4. **Vínculo com a requisição** — onze fatos precisam bater com os claims assinados.
 5. **Vínculo com o agente** — o `agent_name` precisa mapear para o `agent_id` assinado.
 6. **Proveniência de política** — a identidade de política e catálogo assinada precisa ser a confiada.
-7. **Controle de runtime** — parada de emergência e piso de revogação, lidos de uma projeção.
+7. **Controle de runtime** — parada de emergência e piso de revogação, lidos de uma projeção
+   ([aplicação](docs/runtime-kill-switch-enforcement.md),
+   [modelo de ameaças](docs/runtime-kill-switch-threat-model.md)).
 8. **Uso único** — o identificador da autorização é consumido atomicamente; repetição é negada.
 9. **Modelo selecionado** — *depois* do roteamento, o grupo selecionado precisa estar no escopo assinado.
 
@@ -301,7 +303,9 @@ label ilimitado é memória ilimitada. Os logs estruturados guardam o valor lite
 Toda decisão também emite um log `routing_decision` com id da decisão, id de correlação, carga de
 trabalho, grupo de modelo, código de razão e identidade da política. `workflow_id` e `task_id`
 fornecidos pelo chamador ficam fora dos logs, conforme [`docs/PRIVACY.md`](docs/PRIVACY.md). O
-contexto de trace W3C recebido é continuado através da fronteira.
+contexto de trace W3C recebido é continuado através da fronteira
+([ADR-0016](docs/adr/0016-w3c-runtime-trace-context.md),
+[configuração](docs/runtime-tracing.md)).
 
 ## Mapa do repositório
 
@@ -341,6 +345,8 @@ Essas fronteiras mantêm as decisões de política explícitas. Os débitos rast
 - [`docs/runtime-authorization-operations.md`](docs/runtime-authorization-operations.md) — deployments governados, ponta a ponta
 - [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — todas as variáveis de ambiente
 - [`docs/MIGRATION_TO_GENERIC_POLICY.md`](docs/MIGRATION_TO_GENERIC_POLICY.md) — identificadores definidos por política
+- [`docs/runtime-kill-switch-enforcement.md`](docs/runtime-kill-switch-enforcement.md) e seu [modelo de ameaças](docs/runtime-kill-switch-threat-model.md) — parar um agente governado em voo
+- [`docs/runtime-tracing.md`](docs/runtime-tracing.md) — continuar um trace distribuído, e a [avaliação de dependência](docs/A2A_OTEL_KIT_UPGRADE_EVALUATION.md) por trás da versão fixada
 - [`docs/PRIVACY.md`](docs/PRIVACY.md) — o que nunca chega a um log
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) e [`AGENTS.md`](AGENTS.md) — trabalhando neste repositório
 
