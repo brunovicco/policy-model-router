@@ -255,5 +255,3 @@ def test_a_group_a_workload_maps_to_is_not_staged_by_default(tmp_path: Path) -> 
     loaded = load_routing_policy(policy)
 
     assert all(not profile.staged for profile in loaded.model_groups.values())
-
-
