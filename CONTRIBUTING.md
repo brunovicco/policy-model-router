@@ -26,9 +26,9 @@ Every change must pass the full gate before it is proposed:
 uv run python scripts/quality_gate.py
 ```
 
-Use `--check <name>` (see `--list` for the full set: lock, lint, format, architecture, mcp,
-governance, loop-schema-vendor, loop-contracts, typing, tests, security, dependencies, packaging)
-to iterate on one check at a time.
+Use `--check <name>` (see `--list` for the full set: lock, lint, format, architecture,
+loop-schema-vendor, loop-contracts, typing, tests, security, dependencies, packaging) to iterate on
+one check at a time.
 
 ## Making a change
 

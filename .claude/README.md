@@ -12,7 +12,5 @@
 - `workflows/`: scripted multi-agent orchestration for larger tasks.
 - `output-styles/`: response and reporting conventions.
 - `settings.json`: permissions, hooks, environment, and shared defaults.
-- `../.mcp.json.example`: opt-in project MCP configuration without credentials.
-- `../docs/MCP.md`: MCP architecture, approval, authentication, and enterprise controls.
 
 Run `/memory`, `/hooks`, `/context`, `/doctor`, and `/mcp` to inspect what Claude Code loaded.
