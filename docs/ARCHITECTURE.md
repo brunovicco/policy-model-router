@@ -194,8 +194,29 @@ Enforced by `scripts/validate_architecture.py` as part of the quality gate.
   `policy_digest`/`service_version`/`environment`).
 - [ADR-0010](adr/0010-token-based-cost-estimation.md): the cost constraint estimates cost from
   request token counts and per-token rates, not one flat number per model group.
+- [ADR-0011](adr/0011-http-boundary-pre-parse-limits.md): the body-size cap and the per-IP
+  rate-limit tier run in pure ASGI middleware, before FastAPI parses the body, so a malformed or
+  oversized request cannot bypass either.
+- [ADR-0012](adr/0012-signed-runtime-authorization.md): optional Ed25519-signed, single-use
+  Governance runtime authorization, bound to the exact request, the calling agent and the
+  Governance policy provenance this deployment trusts.
+- [ADR-0013](adr/0013-structured-runtime-violation-evidence.md): every runtime denial returns a
+  versioned, content-minimized, digest-bound violation envelope, with authorization trust reported
+  coarsely so it can never be overstated.
+- [ADR-0014](adr/0014-runtime-kill-switch-enforcement.md): the kill switch and revocation floor are
+  read from a Governance-owned projection and checked after the artifact proves valid but before
+  its single-use identifier is consumed; a missing snapshot denies.
+- [ADR-0015](adr/0015-policy-defined-workload-and-model-group-identifiers.md): workloads and model
+  groups are validated policy-defined identifiers rather than closed enums, so the active policy
+  defines the vocabulary and an undeclared workload fails closed at the policy boundary.
+- [ADR-0016](adr/0016-w3c-runtime-trace-context.md): incoming W3C trace context is continued at the
+  routing boundary as observability metadata only - it never participates in authorization, replay
+  detection, policy evaluation or model selection.
 - [architecture-blueprint.md](architecture-blueprint.md): the data-classification authorization
   invariant this router enforces on behalf of the platform.
+
+ADR-0002 and ADR-0003 were never issued: the numbering starts from the retroactive set written when
+this repository was split out, and skipping them is recorded here rather than silently reused.
 
 ## Known gaps
 
