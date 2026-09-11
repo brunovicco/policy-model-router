@@ -511,6 +511,12 @@ application layer resolves it through an `AvailabilityProvider` port
 health check yet - the port exists so one can be added later as a new adapter, without changing the
 routing use case or the domain constraints.
 
+The port resolves the whole candidate set in a single call per request, so an adapter that does
+real I/O can batch, cache and bound one timeout across every group instead of paying those costs
+per group. A group such an adapter omits from its answer is treated as unavailable rather than
+falling back to the policy's flag: a degraded provider must not end up more permissive than an
+explicit denial.
+
 ## Health, readiness, and metrics
 
 `GET /health` always returns `200 {"status": "ok"}` once the process is serving requests. `GET

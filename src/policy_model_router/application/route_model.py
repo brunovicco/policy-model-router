@@ -65,11 +65,17 @@ class RouteModelUseCase:
                 f"routing policy has no mapping for workload {request.workload.value!r}"
             ) from exc
 
+        effective_availability = await self._availability.resolve(
+            {group: profile.available for group, profile in self._policy.model_groups.items()}
+        )
+
         rejection_reasons: dict[ModelGroupId, ConstraintFailure] = {}
         for model_group, profile in self._policy.model_groups.items():
+            # A group the provider omitted is unavailable: never let a partial answer promote a
+            # candidate above what the policy declared for it.
             effective_profile = replace(
                 profile,
-                available=await self._availability.is_available(model_group, profile.available),
+                available=effective_availability.get(model_group, False),
             )
             for constraint in CONSTRAINTS:
                 failure = constraint(request, effective_profile, workload_rule)
