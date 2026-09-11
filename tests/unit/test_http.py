@@ -379,6 +379,32 @@ def test_route_response_never_reveals_other_agents_allowlist(
     assert fast_small["reason_code"] == "agent_not_allowed"
 
 
+def test_route_explains_rejected_candidates_by_default(client: TestClient) -> None:
+    response = client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json()["rejected_candidates"] != []
+
+
+def test_route_returns_an_empty_candidate_list_when_the_caller_opts_out(
+    client: TestClient,
+) -> None:
+    """Opting out empties the list; it never removes the field."""
+    explained = client.post("/route", json=_valid_payload(), headers=_AUTH_HEADERS).json()
+
+    response = client.post(
+        "/route",
+        json=_valid_payload(include_rejected_candidates=False),
+        headers=_AUTH_HEADERS,
+    )
+
+    assert response.status_code == 200
+    bare = response.json()
+    assert bare["rejected_candidates"] == []
+    assert bare["selected_model_group"] == explained["selected_model_group"]
+    assert bare.keys() == explained.keys()
+
+
 def test_route_returns_a_stable_error_envelope_for_an_invalid_request(client: TestClient) -> None:
     response = client.post(
         "/route", json=_valid_payload(workload="not_a_real_workload"), headers=_AUTH_HEADERS

@@ -73,6 +73,18 @@ class ModelRouteRequest(StrictContract):
     structured_output_required: bool
     max_latency_ms: Annotated[int, Field(gt=0)]
     max_cost_usd: Annotated[Decimal, Field(gt=0)]
+    include_rejected_candidates: bool = True
+    """Whether the decision should explain the groups that were not selected.
+
+    Defaults to true, so an existing caller that omits it is unaffected. Opting out evaluates only
+    the workload's mapped group rather than the whole catalog; the selected group and the
+    accept/reject outcome are identical either way, and ``rejected_candidates`` comes back as an
+    empty list rather than disappearing, so the response shape is unchanged.
+
+    This field is deliberately absent from the signed Governance request binding: it changes how
+    much of the decision is explained, never what the decision is, so a caller can set it without
+    invalidating an authorization signed for that request.
+    """
 
 
 class AuthorizedModelRouteRequest(StrictContract):

@@ -65,8 +65,26 @@ class RouteModelUseCase:
         """
         return workload in self._policy.workloads
 
-    async def route(self, request: RouteRequest) -> RouteDecision:
-        """Return the routing decision for one request, or fail closed if it is not authorized."""
+    async def route(
+        self, request: RouteRequest, *, include_rejected_candidates: bool = True
+    ) -> RouteDecision:
+        """Return the routing decision for one request, or fail closed if it is not authorized.
+
+        Args:
+            request: The validated routing request.
+            include_rejected_candidates: Whether to explain the groups that were not selected.
+                Selecting a group only ever requires evaluating the one the workload maps to;
+                every other group is evaluated to produce ``rejected_candidates``, which is
+                explainability, not routing. A caller that will not persist that explanation can
+                opt out and pay for one candidate instead of the whole catalog - including one
+                availability lookup instead of a whole-catalog resolution, which matters once that
+                port reaches a provider rather than a static flag.
+
+                The decision is identical either way: the same group is selected, and the same
+                request is rejected, because the mapped group is evaluated in full regardless.
+                ``rejected_candidates`` is then an empty tuple rather than an absent field, so the
+                response shape never changes and no consumer has to branch on it.
+        """
         try:
             workload_rule = self._policy.workloads[request.workload]
         except KeyError as exc:
@@ -74,12 +92,18 @@ class RouteModelUseCase:
                 f"routing policy has no mapping for workload {request.workload.value!r}"
             ) from exc
 
+        selected = workload_rule.model_group
+        candidates = (
+            self._policy.model_groups
+            if include_rejected_candidates
+            else {selected: self._policy.model_groups[selected]}
+        )
         effective_availability = await self._availability.resolve(
-            {group: profile.available for group, profile in self._policy.model_groups.items()}
+            {group: profile.available for group, profile in candidates.items()}
         )
 
         rejection_reasons: dict[ModelGroupId, ConstraintFailure] = {}
-        for model_group, profile in self._policy.model_groups.items():
+        for model_group, profile in candidates.items():
             # A group the provider omitted is unavailable: never let a partial answer promote a
             # candidate above what the policy declared for it.
             effective_profile = replace(
@@ -92,7 +116,6 @@ class RouteModelUseCase:
                     rejection_reasons[model_group] = failure
                     break
 
-        selected = workload_rule.model_group
         if selected in rejection_reasons:
             failure = rejection_reasons[selected]
             raise NoViableModelGroupError(
@@ -137,10 +160,14 @@ class RouteModelUseCase:
                 required_value=selected.value,
             )
 
-        rejected_candidates = tuple(
-            _to_rejected_candidate(model_group)
-            for model_group in sorted(self._policy.model_groups, key=lambda group: group.value)
-            if model_group != selected
+        rejected_candidates = (
+            tuple(
+                _to_rejected_candidate(model_group)
+                for model_group in sorted(self._policy.model_groups, key=lambda group: group.value)
+                if model_group != selected
+            )
+            if include_rejected_candidates
+            else ()
         )
 
         return RouteDecision(

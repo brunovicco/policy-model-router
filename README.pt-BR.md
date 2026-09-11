@@ -119,7 +119,9 @@ cada candidato — e seleciona o grupo mapeado só se ele sobreviveu. Todo outro
 rejeitado, seja pela restrição que falhou, seja porque a carga mapeia para outro lugar.
 
 Avaliar os grupos que não podem ser selecionados é deliberado: é o que torna a decisão explicável. É
-custo de auditoria, não custo de roteamento.
+custo de auditoria, não custo de roteamento — e um chamador que não vai persistir a explicação pode
+recusá-la com `"include_rejected_candidates": false`, pagando por um candidato em vez do catálogo
+inteiro, sem mudar a decisão.
 
 A ordem importa, porque a primeira restrição que um candidato falha vira sua razão de rejeição.
 
@@ -216,6 +218,7 @@ UTC com fuso explícito, e limites numéricos precisam ser positivos.
 | `structured_output_required` | Booleano |
 | `max_latency_ms` | Inteiro positivo |
 | `max_cost_usd` | Decimal positivo |
+| `include_rejected_candidates` | Booleano, padrão `true`. Use `false` para avaliar só o grupo mapeado: mesma seleção, mesmo desfecho, `rejected_candidates` volta vazio em vez de omitido |
 
 As duas estimativas de token alimentam a restrição de custo: um grupo é precificado por token,
 entrada e saída separadamente, então o custo estimado é função do tamanho real da chamada
