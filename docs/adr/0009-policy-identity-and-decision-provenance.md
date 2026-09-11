@@ -113,3 +113,12 @@ updating - a one-time, mechanical migration (`tests/unit/test_route_model.py`'s 
 tests), not a design concern, mirroring this ADR's original migration of `RouteModelUseCase`'s
 constructor. The `no_viable_model_group` response contract grew one additional key; existing
 consumers reading only `error.code`/`error.message` are unaffected.
+
+## Amendment (2026-09-11): logging bootstrap moved to a2a-otel-kit
+
+This ADR's references to `configure_logging` describe the bootstrap as it stood when the ADR was
+written. Process-wide logging is now configured by `a2a-otel-kit`'s `Observability.configure()` in
+the FastAPI lifespan, and `entrypoints/logging.py` retains only the per-request correlation
+binding. The decision this ADR records - that every routing decision carries policy and deployment
+provenance, correlated by a bound correlation ID - is unchanged; only the component that installs
+the renderer differs.

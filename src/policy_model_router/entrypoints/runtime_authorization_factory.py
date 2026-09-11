@@ -1,6 +1,5 @@
 """Composition helpers for runtime authorization verification."""
 
-from typing import Any
 from urllib.parse import urlparse
 
 from policy_model_router.adapters.runtime_authorization import (
@@ -10,7 +9,10 @@ from policy_model_router.adapters.runtime_authorization import (
     parse_agent_bindings,
 )
 from policy_model_router.adapters.runtime_control import RedisRuntimeControlStore
-from policy_model_router.application.runtime_authorization import RuntimeAuthorizationVerifier
+from policy_model_router.application.runtime_authorization import (
+    RuntimeAuthorizationReplayGuard,
+    RuntimeAuthorizationVerifier,
+)
 from policy_model_router.application.runtime_control import RuntimeControlEnforcer
 from policy_model_router.entrypoints.runtime_authorization_settings import (
     RuntimeAuthorizationSettings,
@@ -141,7 +143,7 @@ def _build_replay_guard(
     redis_url: str | None,
     key_prefix: str,
     max_entries: int,
-) -> Any:
+) -> RuntimeAuthorizationReplayGuard:
     """Use Redis for deployed/shared verification and memory only for local/test."""
     if redis_url:
         try:

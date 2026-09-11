@@ -322,6 +322,12 @@ Edit [`config/routing_policy.yaml`](config/routing_policy.yaml) to manage worklo
 model-group capabilities. The loader requires complete coverage of every declared workload and
 model group and rejects unknown fields.
 
+A model group no workload maps to is rejected too, so configuration cannot be left behind by
+accident. Declare `staged: true` on a group you are provisioning deliberately ahead of the workload
+that will use it - a canary, a reserve, or a group being prepared for a later cutover. Staging
+exempts a group from that reachability check and nothing else: it is still validated in full, and
+still unreachable until a workload maps to it.
+
 Send `SIGHUP` to reload the policy without restarting:
 
 ```bash
@@ -594,6 +600,13 @@ policy; set `REDIS_URL` (already includes the `rate-limit` extra, so no extra in
 needed) to share rate limiting across replicas - see
 [Policy configuration](#policy-configuration) and [Authentication and rate limiting](#authentication-and-rate-limiting).
 
+The image declares a `HEALTHCHECK` against `/health`, and honors `TRUSTED_PROXY_IPS`: leave it
+unset (the default) and the rate-limit key keeps using the raw TCP peer address, trusting no
+forwarded header from anyone; set it to the proxy's own address to recover per-client granularity
+behind an ingress. Never set it to `*` - see
+[Authentication and rate limiting](#authentication-and-rate-limiting) for why trusting the header
+from an unrestricted set of peers lets any client multiply its quota.
+
 SemVer tags trigger the repository's publish workflow, which builds the image and pushes its
 versioned tags to GitHub Container Registry after the quality gate passes.
 
@@ -636,7 +649,7 @@ estimation ([ADR-0010](docs/adr/0010-token-based-cost-estimation.md)), the pre-p
 ([ADR-0011](docs/adr/0011-http-boundary-pre-parse-limits.md)), signed runtime authorization
 ([ADR-0012](docs/adr/0012-signed-runtime-authorization.md)), structured violation evidence
 ([ADR-0013](docs/adr/0013-structured-runtime-violation-evidence.md)), W3C trace continuation
-([ADR-0013, tracing](docs/adr/0013-w3c-runtime-trace-context.md)), kill-switch enforcement
+([ADR-0016](docs/adr/0016-w3c-runtime-trace-context.md)), kill-switch enforcement
 ([ADR-0014](docs/adr/0014-runtime-kill-switch-enforcement.md)), and policy-defined workload and
 model-group identifiers
 ([ADR-0015](docs/adr/0015-policy-defined-workload-and-model-group-identifiers.md)) look the way

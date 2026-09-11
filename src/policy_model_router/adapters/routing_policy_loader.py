@@ -2,7 +2,8 @@
 
 Workload and logical model-group names are policy-defined validated identifiers. The loader fails
 closed on malformed structure, invalid identifiers, duplicate keys, empty catalogs, or references
-to model groups that are not declared in the same policy.
+to model groups that are not declared in the same policy. A declared group that no workload maps to
+is also rejected, unless it declares ``staged: true``.
 """
 
 import hashlib
@@ -70,6 +71,7 @@ class _ModelGroupProfileConfig(BaseModel):
     output_cost_usd_per_million_tokens: Annotated[Decimal, Field(ge=0)]
     available: bool
     allowed_agents: list[str]
+    staged: bool = False
 
 
 class _WorkloadRuleConfig(BaseModel):
@@ -105,10 +107,18 @@ class _RoutingPolicyConfig(BaseModel):
             raise ValueError(f"workloads reference undefined model groups: {names}")
 
         referenced = {rule.model_group for rule in self.workloads.values()}
-        unreferenced = set(self.model_groups) - referenced
+        unreferenced = {
+            group
+            for group in set(self.model_groups) - referenced
+            if not self.model_groups[group].staged
+        }
         if unreferenced:
             names = ", ".join(sorted(group.value for group in unreferenced))
-            raise ValueError(f"model_groups contains unreachable entries: {names}")
+            raise ValueError(
+                f"model_groups contains unreachable entries: {names}. Mark a group "
+                "'staged: true' if it is provisioned deliberately ahead of the workload that "
+                "will map to it."
+            )
         return self
 
 
@@ -126,6 +136,7 @@ def _to_domain(config: _RoutingPolicyConfig, *, policy_digest: str) -> RoutingPo
                 output_cost_usd_per_million_tokens=profile.output_cost_usd_per_million_tokens,
                 available=profile.available,
                 allowed_agents=frozenset(profile.allowed_agents),
+                staged=profile.staged,
             )
             for group, profile in config.model_groups.items()
         }

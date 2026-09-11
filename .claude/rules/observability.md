@@ -15,4 +15,5 @@ paths:
 - Add metrics for latency, throughput, errors, retries, circuit state, queue lag, and business outcomes where relevant.
 - Propagate W3C trace context across HTTP and messaging boundaries.
 - `print()` is prohibited in production code.
-- Call `configure_logging()` from `entrypoints/logging.py` once at process startup; never configure logging elsewhere.
+- Configure process-wide logging once, in the FastAPI lifespan, through `a2a-otel-kit`'s `Observability.configure()`; never configure logging elsewhere.
+- Bind and clear per-request context through `entrypoints/logging.py`'s `bind_correlation_id()`/`clear_request_context()`.
