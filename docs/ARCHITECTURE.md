@@ -18,9 +18,13 @@ flowchart LR
     Router -.->|"loads at startup"| Policy["config/routing_policy.yaml"]
 ```
 
-Upstream dependency: none required. The service reads only its own routing policy file and has no
-database or queue; it does have one optional real network dependency - a Redis-backed rate limiter,
-used when `REDIS_URL` is configured (ADR-0008) - and none otherwise.
+Upstream dependencies depend on the environment. Isolated legacy `development`/`test` can run
+without network dependencies, with an optional Redis-backed rate limiter (ADR-0008). `staging`
+and `production` require signed Runtime Authorization and Runtime Control: a trusted public key
+set and agent bindings are loaded locally, while Redis provides distributed single-use replay
+state and the read-only Governance control projection (ADR-0012, ADR-0014). Deployed Runtime
+Control requires `rediss://`; the same configured URL also backs the rate limiters. The Router
+does not query a Governance HTTP API or invoke providers.
 
 Downstream dependency: none from this service's point of view. Callers are responsible for taking
 `selected_model_group` and resolving it to an actual provider/deployment/credential through their
@@ -107,9 +111,12 @@ are consumed directly by the HTTP entrypoint.
 
 `http.py` is the only entrypoint: a FastAPI app exposing `POST /route`, `GET /health`,
 `GET /readyz`, and `GET /metrics`. Its lifespan hook loads the routing policy, the required API
-keys, and the rate limiter once at startup, and fails fast if the policy is missing/invalid, the
-API keys are not configured, or the rate limiter's backend isn't reachable. `POST /route` requires
-the `X-API-Key` header and is rate-limited per `(client IP, agent_name)`; `/health`, `/readyz`, and
+keys, runtime authorization/control, and the rate limiters once at startup. It fails closed on
+invalid required configuration or an unsuccessful shared-state backend ping. Both runtime
+enforcement switches are mandatory in `staging`/`production`; these environments reject missing
+Redis or non-TLS Runtime Control URLs. `POST /route` requires the `X-API-Key` header and, when
+enforcement is required, a signed envelope whose scope also authorizes the selected group. It is
+rate-limited per `(client IP, agent_name)`; `/health`, `/readyz`, and
 `/metrics` require neither (ADR-0007). `/metrics` serves Prometheus-format output including the
 Redis rate limiter's failure counter (ADR-0008's amendment). `contracts.py` defines the closed
 Pydantic request/response schemas and the mapping to/from domain types. `logging.py` configures

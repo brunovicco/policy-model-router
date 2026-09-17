@@ -192,7 +192,8 @@ environment, and runtime control additionally requires `rediss://`. Install the 
 
 ## Rollout order
 
-1. Deploy with both switches off and confirm normal routing.
+1. In an isolated `development`/`test` environment only, use both switches off to confirm legacy
+   routing. Do not use this configuration for `staging`/`production`: startup rejects it.
 2. Publish the trusted key set and the agent bindings; confirm the digests match Governance.
 3. Turn on `RUNTIME_AUTHORIZATION_REQUIRED` in a non-production environment and watch
    `policy_model_router_runtime_authorization_total{outcome="denied"}` and
@@ -201,11 +202,31 @@ environment, and runtime control additionally requires `rediss://`. Install the 
    every bound agent — a missing snapshot denies.
 5. Promote to `staging`/`production`, where both are mandatory.
 
-## Known gap: the gateway does not forward the envelope yet
+## Gateway forwarding and enforcing composition
 
-[governed-llm-gateway](https://github.com/brunovicco/governed-llm-gateway) verifies this same
-Governance contract for its own enforcement, but its Policy Decision Point adapter posts the flat
-request body. A router deployment with `RUNTIME_AUTHORIZATION_REQUIRED=true` therefore answers it
-`403 runtime_authorization_required`, and the gateway correctly fails closed before any provider
-call. Until that forwarding lands, the supported composition is a non-enforcing router plus the
-gateway's own governance enforcement. The gap is tracked on the gateway's roadmap.
+[governed-llm-gateway](https://github.com/brunovicco/governed-llm-gateway) can forward a supplied
+runtime authorization through its Policy Decision Point adapter as
+`{"request": <metadata>, "authorization": <signed envelope>}`. It preserves the signed document
+and uses its signed workflow/task identity and issuance time for the bound request. The Router
+still independently verifies the signature, request facts, authenticated agent binding, provenance,
+Runtime Control projection, and single-use replay state; forwarding is not an authorization bypass.
+
+Without a supplied envelope, the adapter sends a flat request. An enforcing Router rejects it with
+`403 runtime_authorization_required`, and the Gateway fails closed before any provider call. Align
+the configured issuer/audience, trusted public keys, provenance digests, agent identity/API key,
+and Governance projection before using an enforcing composition. Do not turn off either mandatory
+switch to make staging/production accept a legacy client.
+
+## Deployed startup regression coverage
+
+`tests/unit/test_deployed_runtime_startup.py` exercises the actual factory, settings parsers,
+lifespan, Redis adapters, signature verification, and HTTP route in both deployed environments.
+Controlled Redis clients cover valid startup/shutdown, mandatory switches, trust digests and key
+sets, agent bindings, Redis URL/TLS scheme requirements, a missing client dependency, and startup
+ping failures. HTTP cases pin authentication, signature/request/provenance checks, Runtime Control
+before replay consumption, single use, and denial of a selected group outside the signed scope.
+
+These are offline composition regressions using synthetic signing material. They do not establish
+live TLS certificate validation, Redis ACLs/availability, cross-replica atomicity, real Governance
+publication, or end-to-end Gateway/provider integration. `/readyz` remains a post-startup readiness
+check, not a continuous probe of shared dependencies.
