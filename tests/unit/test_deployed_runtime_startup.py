@@ -545,6 +545,51 @@ def test_deployed_http_composition_verifies_signature_control_and_single_use(
     assert "signing_bytes" not in serialized_logs
 
 
+@pytest.mark.parametrize("length_hint", [None, "1"])
+def test_deployed_oversized_upload_does_not_consume_signed_authorization(
+    deployed_env: str,
+    redis_boundary: _RedisBoundary,
+    http_boundaries: _ObservabilityBoundary,
+    private_key: Ed25519PrivateKey,
+    length_hint: str | None,
+) -> None:
+    """A rejected upload leaves the same valid authorization available for one smaller POST."""
+    envelope = _signed(private_key).model_dump(mode="json")
+    payload = {"request": _wire_request(), "authorization": envelope}
+    body = json.dumps(payload).encode()
+    headers = {
+        "X-API-Key": _API_KEY,
+        "Content-Type": "application/json",
+        "X-Correlation-Id": "signed-body-admission-test",
+    }
+    if length_hint is not None:
+        headers["Content-Length"] = length_hint
+    with TestClient(http_module.app) as client, capture_logs() as logs:
+        http_module.app.state.max_request_body_bytes = len(body)
+        # A generator omits HTTPX's automatic Content-Length. TestClient itself may coalesce
+        # frames; deterministic multi-frame composition is separately covered in test_http.py.
+        oversized = client.post("/route", content=iter((body, b" ")), headers=headers)
+        assert oversized.status_code == 413
+        assert oversized.headers["X-Correlation-Id"] == "signed-body-admission-test"
+        assert not redis_boundary.events
+        assert not redis_boundary.consumed
+        assert not any(
+            entry["event"] in {"routing_decision", "runtime_violation"} for entry in logs
+        )
+
+        accepted = client.post("/route", content=body, headers=headers)
+        assert accepted.status_code == 200
+        assert [operation for operation, _key in redis_boundary.events] == ["get", "set"]
+        duplicate = client.post("/route", content=body, headers=headers)
+        assert duplicate.status_code == 403
+        assert duplicate.json()["error"]["code"] == "replay_detected"
+
+    assert len(redis_boundary.consumed) == 1
+    serialized_logs = json.dumps(logs)
+    assert _API_KEY not in serialized_logs
+    assert envelope["signature"] not in serialized_logs
+
+
 @pytest.mark.parametrize(
     ("case", "expected_code"),
     [

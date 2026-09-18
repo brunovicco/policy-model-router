@@ -5,6 +5,7 @@ import json
 import sys
 import types
 from collections.abc import Generator
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +13,15 @@ import pytest
 import structlog.contextvars
 from a2a_otel_kit import ObservabilitySettings
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import Span, SpanKind
+from starlette.types import Message, Scope
 from structlog.testing import capture_logs
 
+from policy_model_router.application.route_model import RouteModelUseCase
+from policy_model_router.application.runtime_authorization import RuntimeAuthorizationVerifier
 from policy_model_router.entrypoints import http as http_module
 from policy_model_router.entrypoints.http import app
 
@@ -621,6 +629,289 @@ def test_an_oversized_correlation_id_header_is_ignored(client: TestClient) -> No
     assert response.status_code == 200
     assert response.headers["X-Correlation-Id"] != oversized_correlation_id
     assert len(response.headers["X-Correlation-Id"]) < 201
+
+
+async def _body_exchange(
+    messages: tuple[Message, ...],
+    *,
+    headers: tuple[tuple[bytes, bytes], ...] = (),
+    path: str = "/route",
+    method: str = "POST",
+) -> tuple[list[Message], int]:
+    """Exercise the assembled app with controlled ASGI messages, not TestClient buffering."""
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"x-correlation-id", b"body-admission-test"), *headers],
+        "client": ("body-peer", 1234),
+        "server": ("testserver", 80),
+    }
+    reads = 0
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        nonlocal reads
+        assert reads < len(messages), "unexpected receive or remainder drain"
+        result = messages[reads]
+        reads += 1
+        return result
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    return sent, reads
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("declared_length", [None, b"1"])
+async def test_actual_overflow_in_full_pipeline_never_routes_or_consumes_authority(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, declared_length: bytes | None
+) -> None:
+    app.state.max_request_body_bytes = 8
+    ip_calls: list[str] = []
+    original_allow = app.state.ip_rate_limiter.allow
+
+    async def ip_allow(key: str) -> bool:
+        ip_calls.append(key)
+        return bool(await original_allow(key))
+
+    async def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("body rejection must not reach downstream policy or authority")
+
+    monkeypatch.setattr(app.state.ip_rate_limiter, "allow", ip_allow)
+    monkeypatch.setattr(app.state.rate_limiter, "allow", forbidden)
+    monkeypatch.setattr(RouteModelUseCase, "route", forbidden)
+    monkeypatch.setattr(RuntimeAuthorizationVerifier, "verify", forbidden)
+    headers = () if declared_length is None else ((b"content-length", declared_length),)
+    with capture_logs() as logs:
+        sent, reads = await _body_exchange(
+            (
+                {"type": "http.request", "body": b"12345", "more_body": True},
+                {"type": "http.request", "body": b"6789", "more_body": True},
+            ),
+            headers=headers,
+        )
+
+    starts = [message for message in sent if message["type"] == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 413
+    assert (b"x-correlation-id", b"body-admission-test") in starts[0]["headers"]
+    assert reads == 2
+    assert ip_calls == ["ip:body-peer"]
+    assert not any(entry["event"] in {"routing_decision", "runtime_violation"} for entry in logs)
+    assert structlog.contextvars.get_contextvars() == {}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("api_key", [None, _TEST_API_KEY])
+async def test_exact_cap_chunked_json_keeps_schema_and_authentication(
+    client: TestClient, api_key: str | None
+) -> None:
+    body = json.dumps(_valid_payload()).encode()
+    app.state.max_request_body_bytes = len(body)
+    headers: tuple[tuple[bytes, bytes], ...] = ((b"content-type", b"application/json"),)
+    if api_key is not None:
+        headers += ((b"x-api-key", api_key.encode()),)
+    sent, reads = await _body_exchange(
+        (
+            {"type": "http.request", "body": body[:100], "more_body": True},
+            {"type": "http.request", "more_body": True},
+            {"type": "http.request", "body": body[100:]},
+        ),
+        headers=headers,
+    )
+
+    starts = [message for message in sent if message["type"] == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == (401 if api_key is None else 200)
+    assert reads == 3
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("body", [b"{", b"{}", b""])
+async def test_admitted_invalid_json_or_schema_keeps_stable_422(
+    client: TestClient, body: bytes
+) -> None:
+    sent, _ = await _body_exchange(
+        ({"type": "http.request", "body": body},),
+        headers=((b"content-type", b"application/json"),),
+    )
+
+    assert sent[0]["status"] == 422
+    response_body = b"".join(
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+    )
+    assert json.loads(response_body)["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "headers",
+    [
+        ((b"content-length", b"raw-header-must-not-leak"),),
+        ((b"content-length", b"1"), (b"content-length", b"1")),
+    ],
+)
+async def test_bad_length_in_full_pipeline_has_correlation_without_raw_header_logging(
+    client: TestClient, headers: tuple[tuple[bytes, bytes], ...]
+) -> None:
+    with capture_logs() as logs:
+        sent, reads = await _body_exchange((), headers=headers)
+
+    assert sent[0]["status"] == 400
+    assert (b"x-correlation-id", b"body-admission-test") in sent[0]["headers"]
+    assert reads == 0
+    assert "raw-header-must-not-leak" not in json.dumps(logs)
+    assert b"raw-header-must-not-leak" not in b"".join(message.get("body", b"") for message in sent)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [400, 413])
+async def test_body_rejection_preserves_w3c_trace_and_minimized_span(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("synthetic-body-admission-test")
+
+    class _Observability:
+        def start_span(
+            self,
+            name: str,
+            *,
+            kind: SpanKind,
+            attributes: dict[str, str],
+            record_exception: bool,
+        ) -> AbstractContextManager[Span]:
+            return tracer.start_as_current_span(
+                name, kind=kind, attributes=attributes, record_exception=record_exception
+            )
+
+    monkeypatch.setattr(app.state, "observability", _Observability())
+    app.state.max_request_body_bytes = 8
+    trace_id = "11111111111111111111111111111111"
+    headers: tuple[tuple[bytes, bytes], ...] = (
+        (b"traceparent", f"00-{trace_id}-2222222222222222-01".encode()),
+        (b"x-api-key", b"synthetic-secret-not-for-traces"),
+    )
+    messages: tuple[Message, ...] = ()
+    if status == 400:
+        headers += ((b"content-length", b"raw-length-not-for-traces"),)
+    else:
+        messages = ({"type": "http.request", "body": b"raw-body-not-for-traces"},)
+    try:
+        sent, _ = await _body_exchange(messages, headers=headers)
+        spans = exporter.get_finished_spans()
+        assert sent[0]["status"] == status
+        assert len(spans) == 1
+        span = spans[0]
+        assert span.context is not None
+        assert span.context.trace_id == int(trace_id, 16)
+        assert span.parent is not None
+        assert span.parent.span_id == int("2222222222222222", 16)
+        assert span.attributes == {
+            "component": "fastapi",
+            "operation": "http.request",
+            "correlation_id": "body-admission-test",
+            "http.method": "POST",
+            "http.status_code": status,
+            "outcome": "success",
+        }
+        assert span.events == ()
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.anyio
+async def test_incomplete_disconnected_json_does_not_become_a_policy_request(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a disconnected body must not reach policy or authority")
+
+    monkeypatch.setattr(app.state.rate_limiter, "allow", forbidden)
+    monkeypatch.setattr(RouteModelUseCase, "route", forbidden)
+    monkeypatch.setattr(RuntimeAuthorizationVerifier, "verify", forbidden)
+    sent, reads = await _body_exchange(
+        (
+            {"type": "http.request", "body": b'{"schema_version":', "more_body": True},
+            {"type": "http.disconnect"},
+        ),
+        headers=((b"content-type", b"application/json"),),
+    )
+
+    starts = [message for message in sent if message["type"] == "http.response.start"]
+    assert len(starts) == 1
+    # Preserve FastAPI's existing parsing/disconnect error, not a fabricated complete body.
+    assert starts[0]["status"] == 400
+    assert (b"x-correlation-id", b"body-admission-test") in starts[0]["headers"]
+    assert reads == 2
+    assert structlog.contextvars.get_contextvars() == {}
+
+
+@pytest.mark.anyio
+async def test_cancelled_upload_propagates_through_correlation_pipeline(
+    client: TestClient,
+) -> None:
+    entered = asyncio.Event()
+    blocked = asyncio.Event()
+    sent: list[Message] = []
+    reads = 0
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/route",
+        "raw_path": b"/route",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [],
+        "client": ("cancel-peer", 1234),
+        "server": ("testserver", 80),
+    }
+
+    async def receive() -> Message:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return {"type": "http.request", "body": b"partial", "more_body": True}
+        entered.set()
+        await blocked.wait()
+        raise AssertionError("cancelled upload must not resume")
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    task = asyncio.create_task(app(scope, receive, send))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sent == []
+    assert structlog.contextvars.get_contextvars() == {}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path", ["/health", "/readyz", "/metrics"])
+async def test_full_pipeline_probes_do_not_wait_for_uploaded_body(
+    client: TestClient, path: str
+) -> None:
+    sent, reads = await _body_exchange((), path=path, method="GET")
+
+    assert sent[0]["status"] == 200
+    assert reads == 0
 
 
 def test_health_endpoint_requires_no_api_key(client: TestClient) -> None:
