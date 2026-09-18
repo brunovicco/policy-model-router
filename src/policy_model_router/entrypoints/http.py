@@ -32,7 +32,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from opentelemetry.trace import SpanKind
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from policy_model_router.adapters.availability import StaticAvailabilityProvider
 from policy_model_router.adapters.clock import SystemClock
@@ -160,23 +160,19 @@ class RateLimiter(Protocol):
 class _BodySizeAndIpRateLimitMiddleware:
     """Enforce the body-size cap and the per-IP rate-limit tier before FastAPI parses the body.
 
-    A pure ASGI middleware, not the ``@app.middleware("http")``/``BaseHTTPMiddleware`` style used
-    by ``_bind_correlation_id`` below: that style already buffers the request body via
-    ``call_next`` before this code would run, defeating a pre-parse check. This wraps the raw ASGI
-    callable directly, so both checks run before any body bytes are read - closing the gap where a
-    malformed or oversized ``/route`` body previously bypassed both rate-limit tiers entirely
-    (ADR-0011).
+    This pure ASGI boundary admits a complete, byte-bounded ``POST /route`` body before invoking
+    the parser. The outer correlation binder does not read the body itself; its ``call_next``
+    supplies the receive channel to this guard. The IP tier runs before header checks or reads.
 
     Registered via ``app.add_middleware`` *before* the ``_bind_correlation_id`` decorator runs, so
     it ends up wrapped by (inside) the correlation-ID binder: a short-circuited 413/429 response
-    still gets ``X-Correlation-Id`` bound and echoed, same as every other response.
+    still gets ``X-Correlation-Id`` bound and echoed, as does an invalid-length 400 response.
 
     Scope: the per-IP rate-limit check applies only to ``POST /route`` (``/health``/``/readyz``/
-    ``/metrics`` stay unthrottled, matching ADR-0007's design). The body-size check is a
-    ``Content-Length`` header comparison only - a deliberate scope decision, not an oversight: a
-    chunked-transfer-encoding body with no ``Content-Length`` is an accepted residual gap for this
-    service's documented deployment model (behind an authenticated gateway, per ADR-0004), not a
-    full streaming byte-cap.
+    ``/metrics`` stay unthrottled, matching ADR-0007's design). All HTTP paths retain the cheap
+    declared-length precheck; only exact ``POST /route`` receives real-byte admission, including
+    absent or misleading lengths (ADR-0017). The server owns transfer decoding and unread data.
+    This is a per-request payload cap, not an upload timeout or process memory/concurrency limit.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -199,7 +195,8 @@ class _BodySizeAndIpRateLimitMiddleware:
 
         app_state = scope["app"].state
 
-        if scope["path"] == "/route" and scope["method"] == "POST":
+        is_route_post = scope["path"] == "/route" and scope["method"] == "POST"
+        if is_route_post:
             client = scope.get("client")
             client_host = client[0] if client else "unknown"
             ip_allowed = await app_state.ip_rate_limiter.allow(f"ip:{client_host}")
@@ -214,19 +211,85 @@ class _BodySizeAndIpRateLimitMiddleware:
                 return
 
         max_body_bytes = app_state.max_request_body_bytes
-        content_length = next(
-            (value for key, value in scope["headers"] if key == b"content-length"), None
-        )
-        if content_length is not None and int(content_length) > max_body_bytes:
-            response = _error_response(
-                413,
-                "payload_too_large",
-                f"request body exceeds the {max_body_bytes}-byte limit",
-            )
-            await response(scope, receive, send)
+        declared_size_error = _declared_body_size_error(scope, max_body_bytes)
+        if declared_size_error is not None:
+            await declared_size_error(scope, receive, send)
             return
 
-        await self._app(scope, receive, send)
+        if not is_route_post:
+            await self._app(scope, receive, send)
+            return
+
+        body = bytearray()
+        admitted_message: Message | None = None
+        try:
+            while True:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    # Preserve the framework's disconnect path; never complete a partial upload.
+                    admitted_message = message
+                    break
+                if message["type"] != "http.request":
+                    raise RuntimeError("unexpected ASGI event during request body admission")
+                chunk = message.get("body", b"")
+                if len(chunk) > max_body_bytes - len(body):
+                    body.clear()
+                    response = _body_too_large_response(max_body_bytes)
+                    await response(scope, receive, send)
+                    return
+                body.extend(chunk)
+                if not message.get("more_body", False):
+                    admitted_message = {
+                        "type": "http.request",
+                        "body": bytes(body),
+                        "more_body": False,
+                    }
+                    break
+        finally:
+            # Also release accumulated bytes on cancellation or a failing receive/send channel.
+            body.clear()
+
+        async def receive_admitted() -> Message:
+            nonlocal admitted_message
+            if admitted_message is not None:
+                result = admitted_message
+                admitted_message = None
+                return result
+            return await receive()
+
+        await self._app(scope, receive_admitted, send)
+
+
+def _body_too_large_response(max_body_bytes: int) -> JSONResponse:
+    """Build the existing payload-size rejection without recording request content."""
+    return _error_response(
+        413, "payload_too_large", f"request body exceeds the {max_body_bytes}-byte limit"
+    )
+
+
+def _declared_body_size_error(scope: Scope, max_body_bytes: int) -> JSONResponse | None:
+    """Validate one ASCII decimal length hint without converting an unbounded integer.
+
+    Repeated fields and comma lists are rejected conservatively at this application boundary;
+    HTTP transfer framing remains the server/proxy's responsibility.
+    """
+    content_length: bytes | None = None
+    for key, value in scope["headers"]:
+        if key.lower() == b"content-length":
+            if content_length is not None:
+                return _error_response(400, "invalid_request", "invalid Content-Length header")
+            content_length = value.strip(b" \t")
+    if content_length is None:
+        return None
+    if not content_length.isdigit():
+        return _error_response(400, "invalid_request", "invalid Content-Length header")
+    normalized_length = content_length.lstrip(b"0") or b"0"
+    cap = str(max_body_bytes).encode("ascii")
+    if len(normalized_length) > len(cap) or (
+        len(normalized_length) == len(cap) and normalized_length > cap
+    ):
+        return _body_too_large_response(max_body_bytes)
+    return None
 
 
 class AuthenticationError(Exception):

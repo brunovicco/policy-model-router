@@ -3,6 +3,18 @@
 - Status: Accepted
 - Date: 2026-07-23
 
+## Amendment: real-byte admission (2026-09-18)
+
+[ADR-0017](0017-real-request-body-admission.md) supersedes this record's header-only size scope:
+exact `POST /route` now receives bounded complete real-byte admission before parsing, even without
+or with misleading `Content-Length`; invalid/repeated lengths reaching ASGI return a fixed 400.
+The per-IP tier still runs once first, and this ADR's identifier/token/correlation bounds remain.
+The original rationale and observations below are preserved as history, not current gap claims.
+
+Inspection of the currently locked Starlette confirms that the outer correlation binder does not
+itself read the body; `BaseHTTPMiddleware.call_next` passes a receive channel to the inner guard.
+Its original unconditional buffering explanation below is not a current framework guarantee.
+
 ## Context
 
 `docs/ARCHITECTURE.md`'s Known Gaps tracked this explicitly: FastAPI fully parses and

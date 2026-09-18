@@ -219,6 +219,9 @@ Enforced by `scripts/validate_architecture.py` as part of the quality gate.
 - [ADR-0016](adr/0016-w3c-runtime-trace-context.md): incoming W3C trace context is continued at the
   routing boundary as observability metadata only - it never participates in authorization, replay
   detection, policy evaluation or model selection.
+- [ADR-0017](adr/0017-real-request-body-admission.md): bounded real-body admission for exact
+  `POST /route`, including absent/misleading length, before parsing or consuming signed authority.
+  It supersedes ADR-0011's header-only size scope, not its per-IP quota placement.
 - [architecture-blueprint.md](architecture-blueprint.md): the data-classification authorization
   invariant this router enforces on behalf of the platform.
 
@@ -237,7 +240,7 @@ should not be assumed fixed:
 | `/metrics` (and `/health`/`/readyz`) have no network-level restriction configured in this repo | Unauthenticated and unthrottled by design (ADR-0007), matching common health/scrape-probe practice; no ingress/mesh boundary is defined in `Dockerfile`/`docker-compose.yml` | Anyone who can reach the port can read metrics (minor recon: process/GC stats, `/route` outcome counts). Operators must restrict this at the ingress/mesh layer themselves - same as the existing "deploy `/route` behind an authenticated gateway" requirement |
 | Rate-limit key trusts only the raw TCP peer address | `entrypoints/http.py` never reads `X-Forwarded-For`/`Forwarded`; no `ProxyHeadersMiddleware`, no `--forwarded-allow-ips` | Behind a reverse proxy, every real client shares the proxy's IP as the key's IP component, collapsing per-client granularity to one bucket (for both rate-limit tiers). A deployment that later enables proxy-header trust *without* restricting it to the proxy's own address would let any client forge the header and multiply its quota - a known misconfiguration to avoid, not current behavior |
 | `credit_desk_contracts` mirror has no automated compatibility check | `entrypoints/contracts.py` originally mirrored `credit_desk_contracts.routing` field-for-field by hand; ADR-0009 and ADR-0010 added fields the external monorepo does not have yet, and there is still no shared package, published JSON Schema, or contract test between the two repos | The two contracts can drift silently; the external monorepo must be updated by hand to match, and nothing in this repo's CI would catch a future divergence |
-| Body-size cap only checks `Content-Length`, not actual streamed bytes | `_BodySizeAndIpRateLimitMiddleware` (ADR-0011) rejects a declared-oversized `Content-Length` before parsing, but does not wrap `receive()` to count bytes as they arrive | A chunked-transfer-encoding body with no `Content-Length` header bypasses the cap entirely. Accepted for this service's documented deployment model (behind an authenticated gateway, ADR-0004); closing it fully means wrapping `receive()` - real additional complexity not yet judged proportionate |
+| No total upload deadline or global request-memory/concurrency budget | ADR-0017 bounds actual payload bytes before parsing only for exact `POST /route`; other HTTP paths retain the declared-length precheck. The server may already hold an oversized incoming frame, and concurrent requests/framework copies consume additional memory | Slow uploads or many empty frames can still hold a request open. Operators must define ingress size/upload/concurrency controls; the downstream Gateway PEP does not establish an inbound Router proxy or public exposure |
 
 **Resolved:** the runtime enforcement modules (signed-authorization contract and verifier, runtime-control reader, violation-evidence builder) used to sit at the package root, where `layer_for` could not classify them, no dependency rule applied and the gate still reported success; the verifier additionally depended on `entrypoints.contracts`, inverting the rule. The architecture gate now rejects any module outside a layer (with a shrink-only allowlist that has since reached zero), and the modules are split across `domain`/`application`/`adapters`/`entrypoints`, with the verifier taking the domain `RouteRequest` instead of the Pydantic wire model. The signed envelope itself stays in `application` rather than `domain` because it is a Pydantic contract whose canonical signing bytes must not drift. The API key was a single shared secret for the whole service; ADR-0007's 2026-07-22
 amendment replaced it with per-agent keys (`API_KEYS`), so one agent's key can be rotated or
@@ -266,7 +269,10 @@ estimated input/output token counts. Both rate-limit tiers previously sat inside
 handler body, after body validation, so a malformed or oversized body from one IP bypassed both
 tiers entirely; the per-IP tier is fixed (ADR-0011: relocated to a pure ASGI middleware that runs
 before FastAPI parses the body), a `Content-Length`-based body-size cap was added, and
-`workflow_id`/`task_id`/`agent_name`/token estimates gained bounds. All
+`workflow_id`/`task_id`/`agent_name`/token estimates gained bounds. ADR-0017 subsequently adds
+bounded complete real-byte admission for exact `POST /route` and fixed 400 responses for
+invalid/repeated lengths, closing the absent/underdeclared size gap without moving authentication
+or consuming authority on rejection. All
 resolutions have documented residual limits above and in their ADRs - none is full IAM, a highly
 available rate-limiting service, a complete metrics surface, or a live-pricing cost model.
 

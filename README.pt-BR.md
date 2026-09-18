@@ -226,9 +226,10 @@ entrada e saída separadamente, então o custo estimado é função do tamanho r
 
 | Status | Código | Significado |
 |---:|---|---|
+| 400 | `invalid_request` | `Content-Length` inválido ou repetido que chegou à aplicação |
 | 401 | `unauthorized` | `X-API-Key` ausente ou inválida |
 | 403 | *(código de negação de runtime, limitado)* | Autorização ou controle de runtime negou; o corpo traz um envelope `violation` |
-| 413 | `payload_too_large` | Corpo excede `MAX_REQUEST_BODY_BYTES` pelo `Content-Length` declarado |
+| 413 | `payload_too_large` | Corpo real de `POST /route` ou `Content-Length` declarado excede `MAX_REQUEST_BODY_BYTES` |
 | 422 | `invalid_request` | A requisição não bate com o contrato |
 | 422 | `no_viable_model_group` | O grupo mapeado falhou uma restrição rígida; o corpo traz a decisão rejeitada completa |
 | 429 | `rate_limit_exceeded` | Requisições demais para este par `(IP do cliente, agent_name)` |
@@ -247,6 +248,16 @@ variando o `agent_name`. Ambas são por processo por padrão; defina `REDIS_URL`
 entre réplicas ([ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md)).
 
 As configurações estão em [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
+
+**Admissão do corpo** conta os bytes reais de `POST /route` exato antes de interpretar o JSON,
+inclusive corpos chunked ou com tamanho declarado menor que o real. O limite padrão é 16.384 bytes;
+igualdade é aceita. Excedê-lo retorna 413 sem rotear nem consumir autorização assinada, e sem drenar
+o restante do upload. Todas as rotas HTTP também mantêm a verificação do tamanho declarado. Um único
+tamanho decimal ASCII com espaços/tabs nas bordas é aceito como indicação; campos inválidos,
+repetidos ou listas com vírgula que chegam ao ASGI retornam 400. O servidor/proxy HTTP ainda controla
+o enquadramento da transferência e os dados de transporte não lidos. Isso não é timeout total de
+upload, limite de concorrência/memória global nem substituto do ingress
+([ADR-0017](docs/adr/0017-real-request-body-admission.md)).
 
 ## Deployments governados
 
@@ -316,7 +327,7 @@ contexto de trace W3C recebido é continuado através da fronteira
 | `src/policy_model_router/adapters/` | Carregador YAML, clock, IDs, disponibilidade, rate limiters, guards antirrepetição, stores de projeção |
 | `src/policy_model_router/entrypoints/` | Contratos Pydantic de wire, app FastAPI, configurações, mapeamento de erros, evidência de violação |
 | `config/`, `examples/policies/` | A política incluída e políticas de exemplo alternativas |
-| `docs/adr/` | Quinze decisões aceitas, emendadas em vez de reescritas |
+| `docs/adr/` | Dezesseis decisões aceitas, emendadas em vez de reescritas |
 | `scripts/` | O gate de qualidade do projeto e seus validadores de arquitetura e contratos |
 
 As dependências apontam só para dentro — `entrypoints → application → domain`,

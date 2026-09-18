@@ -31,7 +31,17 @@ See [ADR-0007](adr/0007-http-boundary-hardening.md) and
 | `RATE_LIMIT_MAX_TRACKED_KEYS` | `100000` | In-memory limiter only, ignored once `REDIS_URL` is set. Caps distinct keys per tier, evicting the least-recently-touched. |
 | `RATE_LIMIT_FINGERPRINT_SECRET` | *(unset)* | Redis-backed limiter only. HMAC key for the fail-open log fingerprint. Unset uses a random per-process secret: stable within a process, not across restarts. |
 | `REDIS_URL` | *(unset)* | Shares both tiers across replicas. Requires `uv sync --extra rate-limit`. Unset keeps the per-process limiter. |
-| `MAX_REQUEST_BODY_BYTES` | `16384` | Maximum `POST /route` body, checked against `Content-Length` before parsing. A chunked body with no `Content-Length` is not checked ([ADR-0011](adr/0011-http-boundary-pre-parse-limits.md)). |
+| `MAX_REQUEST_BODY_BYTES` | `16384` | Positive cap on actual bytes for exact `POST /route`, admitted completely before parsing, including absent/underdeclared lengths. Equality is accepted; overflow returns 413 without routing or consuming signed authority. All HTTP paths also retain a declared-length precheck ([ADR-0017](adr/0017-real-request-body-admission.md)). |
+
+One non-negative ASCII decimal `Content-Length`, with optional surrounding space/tab, is accepted
+as a hint. Invalid/repeated fields or comma lists reaching ASGI return a fixed 400 `invalid_request`
+before reading. The IP tier still runs once first for `POST /route`, preserving 429 precedence.
+An overflow does not drain an unbounded remainder; transfer framing and unread transport data belong
+to the HTTP server/proxy. Non-routing paths are not made to await a complete upload.
+
+The cap bounds retained routing payload bytes per request, not total process memory, upload
+duration or concurrent requests. No content decoding, timeout or ingress configuration is added;
+operators must retain separate size/upload/concurrency controls at their actual ingress.
 
 The rate-limit key's IP component is always the raw TCP peer address: this service never reads
 `X-Forwarded-For` or `Forwarded` itself. Behind a reverse proxy every real client shares the

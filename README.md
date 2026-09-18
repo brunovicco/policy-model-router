@@ -224,9 +224,10 @@ separately, so estimated cost is a function of the call's actual size ([ADR-0010
 
 | Status | Code | Meaning |
 |---:|---|---|
+| 400 | `invalid_request` | Invalid or repeated `Content-Length` reaching the application |
 | 401 | `unauthorized` | Missing or invalid `X-API-Key` |
 | 403 | *(bounded runtime denial code)* | Runtime authorization or runtime control denied it; the body carries a `violation` envelope |
-| 413 | `payload_too_large` | Body exceeds `MAX_REQUEST_BODY_BYTES` per its declared `Content-Length` |
+| 413 | `payload_too_large` | Actual `POST /route` body or declared `Content-Length` exceeds `MAX_REQUEST_BODY_BYTES` |
 | 422 | `invalid_request` | The request does not match the contract |
 | 422 | `no_viable_model_group` | The mapped group failed a hard constraint; the body carries the full rejected decision |
 | 429 | `rate_limit_exceeded` | Too many requests for this `(client IP, agent_name)` pair |
@@ -244,6 +245,15 @@ per-process by default; set `REDIS_URL` to share them across replicas
 ([ADR-0008](docs/adr/0008-redis-shared-rate-limiter.md)).
 
 Settings are listed in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
+
+**Body admission** counts actual bytes for exact `POST /route` before JSON parsing, including
+chunked or underdeclared bodies. The default cap is 16,384 bytes; equality is accepted. An overflow
+returns 413 without routing or consuming signed authority, and does not drain the remaining upload.
+All HTTP paths also retain the declared-length precheck. A single ASCII decimal length with optional
+surrounding space/tab is accepted as a hint; invalid/repeated fields or comma lists reaching ASGI
+return 400. The HTTP server/proxy still owns transfer framing and unread transport data.
+This is not a total upload timeout, concurrency/global memory limit or ingress replacement
+([ADR-0017](docs/adr/0017-real-request-body-admission.md)).
 
 ## Governed deployments
 
@@ -309,7 +319,7 @@ across the boundary ([ADR-0016](docs/adr/0016-w3c-runtime-trace-context.md),
 | `src/policy_model_router/adapters/` | YAML policy loader, clock, IDs, availability, rate limiters, replay guards, projection stores |
 | `src/policy_model_router/entrypoints/` | Pydantic wire contracts, the FastAPI app, settings, error mapping, violation evidence |
 | `config/`, `examples/policies/` | The shipped policy and alternative example policies |
-| `docs/adr/` | Fifteen accepted decisions, amended rather than rewritten |
+| `docs/adr/` | Sixteen accepted decisions, amended rather than rewritten |
 | `scripts/` | The project quality gate and its architecture and contract validators |
 
 Dependencies point inward only — `entrypoints → application → domain`, `adapters → application/domain`,
